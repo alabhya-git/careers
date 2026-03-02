@@ -45,23 +45,31 @@ const defaultPrivacyForm = {
 const defaultForgotForm = {
   identifierType: "email",
   identifier: "",
-  channel: "email",
-  otp: "",
+  totp: "",
   newPassword: "",
   confirmPassword: "",
 };
 
 const defaultResetState = {
-  channel: "email",
-  otp: "",
+  totp: "",
   newPassword: "",
   confirmPassword: "",
 };
 
 const defaultDeleteState = {
-  channel: "email",
-  otp: "",
+  totp: "",
 };
+
+function buildTotpQrUrl(otpauthUrl) {
+  if (!otpauthUrl) {
+    return "";
+  }
+
+  return (
+    "https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=" +
+    encodeURIComponent(otpauthUrl)
+  );
+}
 
 function normalizeIdentifier(identifierType, value) {
   const raw = String(value || "").trim();
@@ -105,18 +113,16 @@ function App() {
   const [authView, setAuthView] = useState("login");
   const [loginStage, setLoginStage] = useState("credentials");
   const [pendingLogin, setPendingLogin] = useState(null);
-  const [loginOtpHint, setLoginOtpHint] = useState("");
+  const [totpSetupData, setTotpSetupData] = useState(null);
 
   const [statusMessage, setStatusMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
-  const [latestDevOtp, setLatestDevOtp] = useState(null);
   const [isBusy, setIsBusy] = useState(false);
 
   const [loginForm, setLoginForm] = useState({
     identifierType: "email",
     identifier: "",
     password: "",
-    channel: "email",
   });
   const [loginOtp, setLoginOtp] = useState("");
 
@@ -129,8 +135,7 @@ function App() {
 
   const [resumeFile, setResumeFile] = useState(null);
   const [resumeInfo, setResumeInfo] = useState(null);
-  const [downloadChannel, setDownloadChannel] = useState("email");
-  const [downloadOtp, setDownloadOtp] = useState("");
+  const [downloadTotp, setDownloadTotp] = useState("");
 
   const [securityReset, setSecurityReset] = useState(defaultResetState);
   const [securityDelete, setSecurityDelete] = useState(defaultDeleteState);
@@ -190,7 +195,7 @@ function App() {
     setLoginStage("credentials");
     setPendingLogin(null);
     setLoginOtp("");
-    setLoginOtpHint("");
+    setTotpSetupData(null);
     setForgotStage("request");
     setForgotForm(defaultForgotForm);
   }, []);
@@ -199,7 +204,6 @@ function App() {
     setToken("");
     setCurrentUser(null);
     setActiveTab("profile");
-    setLatestDevOtp(null);
     resetAuthFlow();
   }, [resetAuthFlow]);
 
@@ -321,7 +325,6 @@ function App() {
       });
 
       setStatusMessage(payload.message || "Account created.");
-      setLatestDevOtp(null);
       setAuthView("login");
       setLoginStage("credentials");
       setLoginForm((previous) => ({
@@ -353,7 +356,6 @@ function App() {
         body: {
           identifier,
           password: loginForm.password,
-          channel: loginForm.channel,
         },
       });
 
@@ -361,20 +363,29 @@ function App() {
         setToken(payload.token);
         setCurrentUser(payload.user);
         setStatusMessage("Login successful.");
-        setLatestDevOtp(null);
+        setPendingLogin(null);
+        setTotpSetupData(null);
+        setLoginOtp("");
         return;
       }
 
       setPendingLogin({
         identifier,
         password: loginForm.password,
-        channel: loginForm.channel,
       });
-      setLoginOtpHint(payload.deliveryHint || "");
-      setLoginStage("otp");
-      setStatusMessage(payload.message || "OTP sent. Enter it to continue.");
-      if (payload.devOtp) {
-        setLatestDevOtp({ [loginForm.channel]: payload.devOtp });
+      if (payload.nextStep === "totp_setup") {
+        setTotpSetupData(payload.totpSetup || null);
+        setLoginStage("setup");
+        setStatusMessage(
+          payload.message ||
+            "Scan QR in Google Authenticator and enter the current 6-digit code."
+        );
+      } else {
+        setTotpSetupData(null);
+        setLoginStage("otp");
+        setStatusMessage(
+          payload.message || "Enter your authenticator app code to continue."
+        );
       }
     } catch (error) {
       setErrorMessage(error.message);
@@ -399,23 +410,19 @@ function App() {
         method: "POST",
         body: {
           ...pendingLogin,
-          otp: loginOtp,
+          totp: loginOtp,
         },
       });
 
       setToken(payload.token);
       setCurrentUser(payload.user);
       setStatusMessage("Login successful.");
-      setLatestDevOtp(null);
       setLoginOtp("");
       setPendingLogin(null);
+      setTotpSetupData(null);
       setLoginStage("credentials");
     } catch (error) {
-      setErrorMessage(`${error.message} Please login again.`);
-      setPendingLogin(null);
-      setLoginOtp("");
-      setLoginStage("credentials");
-      setLatestDevOtp(null);
+      setErrorMessage(error.message);
     } finally {
       setIsBusy(false);
     }
@@ -436,19 +443,18 @@ function App() {
         method: "POST",
         body: {
           identifier,
-          channel: forgotForm.channel,
         },
       });
 
-      setStatusMessage(payload.message || "Reset OTP sent.");
+      setStatusMessage(
+        payload.message ||
+          "Enter authenticator code and new password to complete reset."
+      );
       setForgotStage("confirm");
       setForgotForm((previous) => ({
         ...previous,
         identifier,
       }));
-      if (payload.devOtp) {
-        setLatestDevOtp({ [forgotForm.channel]: payload.devOtp });
-      }
     } catch (error) {
       setErrorMessage(error.message);
     } finally {
@@ -472,8 +478,7 @@ function App() {
         method: "POST",
         body: {
           identifier: forgotForm.identifier,
-          channel: forgotForm.channel,
-          otp: forgotForm.otp,
+          totp: forgotForm.totp,
           newPassword: forgotForm.newPassword,
         },
       });
@@ -482,7 +487,6 @@ function App() {
       setAuthView("login");
       setForgotStage("request");
       setForgotForm(defaultForgotForm);
-      setLatestDevOtp(null);
     } catch (error) {
       setErrorMessage(error.message);
     } finally {
@@ -554,28 +558,6 @@ function App() {
     }
   };
 
-  const handleRequestDownloadOtp = async () => {
-    clearFeedback();
-    setIsBusy(true);
-
-    try {
-      const payload = await request("/api/resume/request-download-otp", {
-        method: "POST",
-        auth: true,
-        body: { channel: downloadChannel },
-      });
-
-      setStatusMessage(payload.message || "Download OTP sent.");
-      if (payload.devOtp) {
-        setLatestDevOtp({ [downloadChannel]: payload.devOtp });
-      }
-    } catch (error) {
-      setErrorMessage(error.message);
-    } finally {
-      setIsBusy(false);
-    }
-  };
-
   const handleDownloadResume = async () => {
     clearFeedback();
     setIsBusy(true);
@@ -585,8 +567,7 @@ function App() {
         method: "POST",
         auth: true,
         body: {
-          channel: downloadChannel,
-          otp: downloadOtp,
+          totp: downloadTotp,
         },
         responseType: "blob",
       });
@@ -604,34 +585,7 @@ function App() {
       URL.revokeObjectURL(url);
 
       setStatusMessage("Resume downloaded.");
-      setDownloadOtp("");
-    } catch (error) {
-      setErrorMessage(error.message);
-    } finally {
-      setIsBusy(false);
-    }
-  };
-
-  const handleSecurityPasswordResetOtp = async () => {
-    clearFeedback();
-    setIsBusy(true);
-
-    try {
-      const identifier =
-        securityReset.channel === "email" ? currentUser.email : currentUser.mobile;
-
-      const payload = await request("/api/auth/password-reset/request", {
-        method: "POST",
-        body: {
-          identifier,
-          channel: securityReset.channel,
-        },
-      });
-
-      setStatusMessage(payload.message || "Password reset OTP sent.");
-      if (payload.devOtp) {
-        setLatestDevOtp({ [securityReset.channel]: payload.devOtp });
-      }
+      setDownloadTotp("");
     } catch (error) {
       setErrorMessage(error.message);
     } finally {
@@ -651,44 +605,19 @@ function App() {
     setIsBusy(true);
 
     try {
-      const identifier =
-        securityReset.channel === "email" ? currentUser.email : currentUser.mobile;
+      const identifier = currentUser.email;
 
       const payload = await request("/api/auth/password-reset/confirm", {
         method: "POST",
         body: {
           identifier,
-          channel: securityReset.channel,
-          otp: securityReset.otp,
+          totp: securityReset.totp,
           newPassword: securityReset.newPassword,
         },
       });
 
       setStatusMessage(payload.message || "Password reset successful.");
       setSecurityReset(defaultResetState);
-      setLatestDevOtp(null);
-    } catch (error) {
-      setErrorMessage(error.message);
-    } finally {
-      setIsBusy(false);
-    }
-  };
-
-  const handleRequestAccountDeletionOtp = async () => {
-    clearFeedback();
-    setIsBusy(true);
-
-    try {
-      const payload = await request("/api/account/request-deletion-otp", {
-        method: "POST",
-        auth: true,
-        body: { channel: securityDelete.channel },
-      });
-
-      setStatusMessage(payload.message || "Account deletion OTP sent.");
-      if (payload.devOtp) {
-        setLatestDevOtp({ [securityDelete.channel]: payload.devOtp });
-      }
     } catch (error) {
       setErrorMessage(error.message);
     } finally {
@@ -706,8 +635,7 @@ function App() {
         method: "POST",
         auth: true,
         body: {
-          channel: securityDelete.channel,
-          otp: securityDelete.otp,
+          totp: securityDelete.totp,
         },
       });
 
@@ -793,16 +721,13 @@ function App() {
 
       {statusMessage && <div className="alert success">{statusMessage}</div>}
       {errorMessage && <div className="alert error">{errorMessage}</div>}
-      {latestDevOtp && (
-        <div className="alert info">Dev OTP: {JSON.stringify(latestDevOtp)}</div>
-      )}
 
       {!currentUser ? (
         <main className="auth-stage">
           <section className="hero-copy">
             <h2>Secure access for your next career move.</h2>
             <p>
-              Clean two-step login, encrypted resumes, and OTP-protected critical actions.
+              Authenticator-based login, encrypted resumes, and TOTP-protected critical actions.
             </p>
           </section>
 
@@ -858,22 +783,6 @@ function App() {
                       />
                     </label>
 
-                    <label>
-                      OTP Channel
-                      <select
-                        value={loginForm.channel}
-                        onChange={(event) =>
-                          setLoginForm((previous) => ({
-                            ...previous,
-                            channel: event.target.value,
-                          }))
-                        }
-                      >
-                        <option value="email">Email OTP</option>
-                        <option value="mobile">SMS OTP</option>
-                      </select>
-                    </label>
-
                     <button className="btn" type="submit" disabled={isBusy}>
                       Continue
                     </button>
@@ -906,23 +815,51 @@ function App() {
                 </>
               ) : (
                 <>
-                  <h3>Enter OTP</h3>
+                  <h3>
+                    {loginStage === "setup"
+                      ? "Set Up Authenticator"
+                      : "Enter Authenticator Code"}
+                  </h3>
                   <p className="muted-copy">
-                    OTP sent to {loginOtpHint || "your selected channel"}.
+                    {loginStage === "setup"
+                      ? "Scan the QR code in Google Authenticator and enter current 6-digit code."
+                      : "Open your authenticator app and enter the current 6-digit code."}
                   </p>
+
+                  {loginStage === "setup" && totpSetupData && (
+                    <div className="totp-setup-card">
+                      <img
+                        className="totp-qr"
+                        src={totpSetupData.qrCodeUrl || buildTotpQrUrl(totpSetupData.otpauthUrl)}
+                        alt="Authenticator QR"
+                      />
+                      <p className="muted-copy">
+                        Manual key: <code>{totpSetupData.manualEntryKey}</code>
+                      </p>
+                      <p className="muted-copy">
+                        Account: {totpSetupData.accountName || pendingLogin?.identifier}
+                      </p>
+                    </div>
+                  )}
+
                   <form onSubmit={handleLoginOtpSubmit}>
                     <label>
-                      One-time password
+                      Authenticator code
                       <input
                         value={loginOtp}
                         onChange={(event) => setLoginOtp(event.target.value)}
+                        inputMode="numeric"
+                        pattern="[0-9]{6}"
+                        placeholder="123456"
                         required
                       />
                     </label>
 
                     <div className="stack-actions">
                       <button className="btn" type="submit" disabled={isBusy}>
-                        Verify and Login
+                        {loginStage === "setup"
+                          ? "Complete Setup and Login"
+                          : "Verify and Login"}
                       </button>
                       <button
                         type="button"
@@ -931,8 +868,7 @@ function App() {
                           setLoginStage("credentials");
                           setPendingLogin(null);
                           setLoginOtp("");
-                          setLoginOtpHint("");
-                          setLatestDevOtp(null);
+                          setTotpSetupData(null);
                         }}
                         disabled={isBusy}
                       >
@@ -1080,39 +1016,25 @@ function App() {
                       required
                     />
                   </label>
-
-                  <label>
-                    OTP Channel
-                    <select
-                      value={forgotForm.channel}
-                      onChange={(event) =>
-                        setForgotForm((previous) => ({
-                          ...previous,
-                          channel: event.target.value,
-                        }))
-                      }
-                    >
-                      <option value="email">Email OTP</option>
-                      <option value="mobile">SMS OTP</option>
-                    </select>
-                  </label>
-
                   <button className="btn" type="submit" disabled={isBusy}>
-                    Send OTP
+                    Continue
                   </button>
                 </form>
               ) : (
                 <form onSubmit={handleForgotConfirm}>
                   <label>
-                    OTP
+                    Authenticator code
                     <input
-                      value={forgotForm.otp}
+                      value={forgotForm.totp}
                       onChange={(event) =>
                         setForgotForm((previous) => ({
                           ...previous,
-                          otp: event.target.value,
+                          totp: event.target.value,
                         }))
                       }
+                      inputMode="numeric"
+                      pattern="[0-9]{6}"
+                      placeholder="123456"
                       required
                     />
                   </label>
@@ -1161,7 +1083,7 @@ function App() {
                     setForgotStage("request");
                     setForgotForm((previous) => ({
                       ...previous,
-                      otp: "",
+                      totp: "",
                       newPassword: "",
                       confirmPassword: "",
                     }));
@@ -1384,31 +1306,13 @@ function App() {
 
               <div className="download-tools">
                 <label>
-                  Download OTP Channel
-                  <select
-                    value={downloadChannel}
-                    onChange={(event) => setDownloadChannel(event.target.value)}
-                  >
-                    <option value="email">Email OTP</option>
-                    <option value="mobile">SMS OTP</option>
-                  </select>
-                </label>
-
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  onClick={handleRequestDownloadOtp}
-                  disabled={isBusy || !resumeInfo}
-                >
-                  Send Download OTP
-                </button>
-
-                <label>
-                  OTP
+                  Authenticator code
                   <input
-                    value={downloadOtp}
-                    onChange={(event) => setDownloadOtp(event.target.value)}
-                    placeholder="Enter OTP"
+                    value={downloadTotp}
+                    onChange={(event) => setDownloadTotp(event.target.value)}
+                    inputMode="numeric"
+                    pattern="[0-9]{6}"
+                    placeholder="123456"
                   />
                 </label>
 
@@ -1416,7 +1320,7 @@ function App() {
                   type="button"
                   className="btn"
                   onClick={handleDownloadResume}
-                  disabled={isBusy || !resumeInfo || !downloadOtp}
+                  disabled={isBusy || !resumeInfo || !downloadTotp}
                 >
                   Download Resume
                 </button>
@@ -1431,43 +1335,21 @@ function App() {
               <div className="security-grid">
                 <article className="security-card">
                   <h3>Password Reset</h3>
-                  <p className="muted-copy">OTP required for changing your password.</p>
+                  <p className="muted-copy">Authenticator code required for changing your password.</p>
                   <form onSubmit={handleSecurityPasswordResetConfirm}>
                     <label>
-                      OTP Channel
-                      <select
-                        value={securityReset.channel}
-                        onChange={(event) =>
-                          setSecurityReset((previous) => ({
-                            ...previous,
-                            channel: event.target.value,
-                          }))
-                        }
-                      >
-                        <option value="email">Email OTP</option>
-                        <option value="mobile">SMS OTP</option>
-                      </select>
-                    </label>
-
-                    <button
-                      type="button"
-                      className="btn btn-ghost"
-                      onClick={handleSecurityPasswordResetOtp}
-                      disabled={isBusy}
-                    >
-                      Send Reset OTP
-                    </button>
-
-                    <label>
-                      OTP
+                      Authenticator code
                       <input
-                        value={securityReset.otp}
+                        value={securityReset.totp}
                         onChange={(event) =>
                           setSecurityReset((previous) => ({
                             ...previous,
-                            otp: event.target.value,
+                            totp: event.target.value,
                           }))
                         }
+                        inputMode="numeric"
+                        pattern="[0-9]{6}"
+                        placeholder="123456"
                         required
                       />
                     </label>
@@ -1511,45 +1393,23 @@ function App() {
                 <article className="security-card danger-zone">
                   <h3>Delete Account</h3>
                   <p className="muted-copy">
-                    This is permanent. OTP verification is mandatory.
+                    This is permanent. Authenticator verification is mandatory.
                   </p>
 
                   <form onSubmit={handleAccountDeletion}>
                     <label>
-                      OTP Channel
-                      <select
-                        value={securityDelete.channel}
-                        onChange={(event) =>
-                          setSecurityDelete((previous) => ({
-                            ...previous,
-                            channel: event.target.value,
-                          }))
-                        }
-                      >
-                        <option value="email">Email OTP</option>
-                        <option value="mobile">SMS OTP</option>
-                      </select>
-                    </label>
-
-                    <button
-                      type="button"
-                      className="btn btn-ghost"
-                      onClick={handleRequestAccountDeletionOtp}
-                      disabled={isBusy}
-                    >
-                      Send Deletion OTP
-                    </button>
-
-                    <label>
-                      OTP
+                      Authenticator code
                       <input
-                        value={securityDelete.otp}
+                        value={securityDelete.totp}
                         onChange={(event) =>
                           setSecurityDelete((previous) => ({
                             ...previous,
-                            otp: event.target.value,
+                            totp: event.target.value,
                           }))
                         }
+                        inputMode="numeric"
+                        pattern="[0-9]{6}"
+                        placeholder="123456"
                         required
                       />
                     </label>
@@ -1573,7 +1433,7 @@ function App() {
                   <strong>{adminTotals.totalUsers || 0}</strong>
                 </div>
                 <div className="kpi">
-                  <span>Verified Users</span>
+                  <span>TOTP Enabled</span>
                   <strong>{adminTotals.verifiedUsers || 0}</strong>
                 </div>
                 <div className="kpi">

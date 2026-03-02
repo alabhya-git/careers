@@ -14,6 +14,7 @@ const {
   PORT,
   CORS_ORIGIN,
   OTP_STEP_SECONDS,
+  TOTP_ISSUER,
   RESUME_DIR,
 } = require("./src/config");
 const { appendAuditLog, verifyAuditChain } = require("./src/audit");
@@ -22,7 +23,6 @@ const {
   hashPassword,
   verifyPassword,
   generateOtpSecret,
-  generateTotp,
   verifyTotp,
   signAuthToken,
   verifyAuthToken,
@@ -32,20 +32,11 @@ const {
 
 const app = express();
 
-const OTP_CHANNELS = new Set(["email", "mobile"]);
-const OTP_PURPOSES = new Set([
-  "email_verification",
-  "mobile_verification",
-  "login",
-  "resume_download",
-  "account_deletion",
-  "password_reset",
-]);
 const PROFILE_PRIVACY_OPTIONS = new Set(["public", "connections", "private"]);
 const ALLOWED_SELF_ROLES = new Set(["user", "recruiter"]);
-const MAX_OTP_RESEND_INTERVAL_MS = 30 * 1000;
 const PASSWORD_POLICY =
   /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z\d]).{8,64}$/;
+const TOTP_SETUP_QR_SIZE = 240;
 
 const baseCorsOptions = {
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
@@ -147,6 +138,78 @@ function maskMobile(mobile) {
   return `${"*".repeat(Math.max(digits.length - 4, 1))}${digits.slice(-4)}`;
 }
 
+function normalizeTotpCode(value) {
+  return String(value || "").replace(/\s+/g, "");
+}
+
+function ensureUserTotpState(user) {
+  if (!user.totp || typeof user.totp !== "object") {
+    user.totp = {};
+  }
+
+  if (typeof user.totp.secret !== "string") {
+    user.totp.secret = "";
+  }
+
+  if (typeof user.totp.pendingSecret !== "string") {
+    user.totp.pendingSecret = "";
+  }
+
+  if (
+    user.totp.pendingIssuedAt !== null &&
+    typeof user.totp.pendingIssuedAt !== "string"
+  ) {
+    user.totp.pendingIssuedAt = null;
+  }
+
+  if (
+    user.totp.lastVerifiedAt !== null &&
+    typeof user.totp.lastVerifiedAt !== "string"
+  ) {
+    user.totp.lastVerifiedAt = null;
+  }
+
+  if (typeof user.totp.isEnabled !== "boolean") {
+    user.totp.isEnabled = Boolean(user.totp.secret);
+  }
+
+  if (user.totp.secret && !user.totp.isEnabled) {
+    user.totp.isEnabled = true;
+  }
+
+  return user.totp;
+}
+
+function buildTotpSetupPayload(user, secret) {
+  const accountName = user.email || user.id;
+  const label = `${TOTP_ISSUER}:${accountName}`;
+  const otpauthUrl =
+    `otpauth://totp/${encodeURIComponent(label)}` +
+    `?secret=${encodeURIComponent(secret)}` +
+    `&issuer=${encodeURIComponent(TOTP_ISSUER)}` +
+    `&algorithm=SHA1&digits=6&period=${OTP_STEP_SECONDS}`;
+  const qrCodeUrl =
+    `https://api.qrserver.com/v1/create-qr-code/?size=${TOTP_SETUP_QR_SIZE}x${TOTP_SETUP_QR_SIZE}` +
+    `&data=${encodeURIComponent(otpauthUrl)}`;
+
+  return {
+    issuer: TOTP_ISSUER,
+    accountName,
+    manualEntryKey: secret,
+    otpauthUrl,
+    qrCodeUrl,
+  };
+}
+
+function verifyUserTotp(user, code) {
+  const totpState = ensureUserTotpState(user);
+  if (!totpState.isEnabled || !totpState.secret) {
+    return false;
+  }
+
+  return verifyTotp(totpState.secret, normalizeTotpCode(code));
+}
+
 function defaultPrivacySettings() {
   return {
     headline: "public",
@@ -215,6 +278,8 @@ function safeUserResponse(user) {
     return null;
   }
 
+  const totpState = ensureUserTotpState(user);
+
   return {
     id: user.id,
     role: user.role,
@@ -223,6 +288,7 @@ function safeUserResponse(user) {
     isEmailVerified: Boolean(user.isEmailVerified),
     isMobileVerified: Boolean(user.isMobileVerified),
     isSuspended: Boolean(user.isSuspended),
+    totpEnabled: Boolean(totpState.isEnabled && totpState.secret),
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
     lastLoginAt: user.lastLoginAt || null,
@@ -289,71 +355,36 @@ function requireRole(roles) {
   };
 }
 
-function issueOtp(user, channel) {
-  const now = Date.now();
-  user.otpLastSentAt = user.otpLastSentAt || {};
-  const previousTimestamp = user.otpLastSentAt[channel];
+function migrateUsersToTotpIfNeeded() {
+  const db = readDb();
+  let changed = false;
+  const now = new Date().toISOString();
 
-  if (previousTimestamp) {
-    const elapsedMs = now - new Date(previousTimestamp).getTime();
-    if (elapsedMs < MAX_OTP_RESEND_INTERVAL_MS) {
-      return {
-        ok: false,
-        retryAfterMs: MAX_OTP_RESEND_INTERVAL_MS - elapsedMs,
-      };
+  db.users.forEach((user) => {
+    let userChanged = false;
+    const previousState = JSON.stringify(user.totp || {});
+    const totp = ensureUserTotpState(user);
+    if (JSON.stringify(totp) !== previousState) {
+      changed = true;
+      userChanged = true;
     }
-  }
 
-  const secret =
-    channel === "email" ? user.otpSecrets.email : user.otpSecrets.mobile;
-  const otp = generateTotp(secret);
-  user.otpLastSentAt[channel] = new Date(now).toISOString();
-  user.updatedAt = new Date(now).toISOString();
+    if (user.otpSecrets || user.otpLastSentAt) {
+      delete user.otpSecrets;
+      delete user.otpLastSentAt;
+      changed = true;
+      userChanged = true;
+    }
 
-  return { ok: true, otp };
-}
-
-function saveAndRespondOtpResult({
-  db,
-  user,
-  channel,
-  purpose,
-  actorUserId,
-  action,
-  res,
-}) {
-  const otpResult = issueOtp(user, channel);
-  if (!otpResult.ok) {
-    res.status(429).json({
-      message: "OTP recently sent. Try again shortly.",
-      retryAfterSeconds: Math.ceil(otpResult.retryAfterMs / 1000),
-    });
-    return false;
-  }
-
-  appendAuditLog(db, {
-    actorUserId,
-    action,
-    targetUserId: user.id,
-    metadata: { channel, purpose },
+    if (userChanged) {
+      user.updatedAt = now;
+    }
   });
-  writeDb(db);
 
-  const responseBody = {
-    message: `OTP generated for ${purpose}.`,
-    channel,
-    purpose,
-    expiresInSeconds: OTP_STEP_SECONDS,
-    deliveryHint:
-      channel === "email" ? maskEmail(user.email) : maskMobile(user.mobile),
-  };
-
-  if (process.env.NODE_ENV !== "production") {
-    responseBody.devOtp = otpResult.otp;
+  if (changed) {
+    writeDb(db);
+    console.log("Migrated existing users to mandatory authenticator TOTP state.");
   }
-
-  res.json(responseBody);
-  return true;
 }
 
 function deleteUserRecord(db, userId) {
@@ -398,13 +429,12 @@ function ensureDefaultAdminAccount() {
     isEmailVerified: true,
     isMobileVerified: true,
     isSuspended: false,
-    otpSecrets: {
-      email: generateOtpSecret(),
-      mobile: generateOtpSecret(),
-    },
-    otpLastSentAt: {
-      email: null,
-      mobile: null,
+    totp: {
+      secret: "",
+      pendingSecret: "",
+      pendingIssuedAt: null,
+      isEnabled: false,
+      lastVerifiedAt: null,
     },
     profile: buildDefaultProfile("Platform Admin"),
     resume: null,
@@ -423,7 +453,9 @@ function ensureDefaultAdminAccount() {
   writeDb(db);
 
   // This log is intentionally explicit to make first-run access possible in local setup.
-  console.log(`Default admin created: ${adminEmail} / ${adminPassword}`);
+  console.log(
+    `Default admin created: ${adminEmail} / ${adminPassword} (Authenticator setup required on first login)`
+  );
 }
 
 app.get("/", (_, res) => {
@@ -477,13 +509,12 @@ app.post("/api/auth/register", (req, res) => {
     isEmailVerified: true,
     isMobileVerified: true,
     isSuspended: false,
-    otpSecrets: {
-      email: generateOtpSecret(),
-      mobile: generateOtpSecret(),
-    },
-    otpLastSentAt: {
-      email: null,
-      mobile: null,
+    totp: {
+      secret: "",
+      pendingSecret: "",
+      pendingIssuedAt: null,
+      isEnabled: false,
+      lastVerifiedAt: null,
     },
     profile: buildDefaultProfile(name),
     resume: null,
@@ -502,145 +533,36 @@ app.post("/api/auth/register", (req, res) => {
   writeDb(db);
 
   const responseBody = {
-    message: "Registration successful. You can now sign in.",
+    message:
+      "Registration successful. Sign in and complete authenticator app setup.",
     user: safeUserResponse(user),
   };
 
   res.status(201).json(responseBody);
 });
 
-app.post("/api/auth/request-otp", (req, res) => {
-  const identifier = String(req.body.identifier || "").trim();
-  const channel = String(req.body.channel || "").toLowerCase();
-  const purpose = String(req.body.purpose || "").toLowerCase();
-
-  if (!identifier || !OTP_CHANNELS.has(channel) || !OTP_PURPOSES.has(purpose)) {
-    res.status(400).json({
-      message: "identifier, channel, and purpose are required.",
-    });
-    return;
-  }
-
-  const db = readDb();
-  const user = getUserByIdentifier(db, identifier);
-  if (!user) {
-    res.status(404).json({ message: "User not found." });
-    return;
-  }
-
-  if (user.isSuspended) {
-    res.status(403).json({ message: "Account is suspended." });
-    return;
-  }
-
-  if (purpose === "email_verification" && channel !== "email") {
-    res
-      .status(400)
-      .json({ message: "Email verification requires channel=email." });
-    return;
-  }
-
-  if (purpose === "mobile_verification" && channel !== "mobile") {
-    res
-      .status(400)
-      .json({ message: "Mobile verification requires channel=mobile." });
-    return;
-  }
-
-  saveAndRespondOtpResult({
-    db,
-    user,
-    channel,
-    purpose,
-    actorUserId: user.id,
-    action: "OTP_REQUESTED",
-    res,
+app.post("/api/auth/request-otp", (_, res) => {
+  res.status(410).json({
+    message:
+      "Email/SMS OTP is disabled. Use authenticator app (TOTP) for login and high-risk actions.",
   });
 });
 
-app.post("/api/auth/verify-otp", (req, res) => {
-  const identifier = String(req.body.identifier || "").trim();
-  const channel = String(req.body.channel || "").toLowerCase();
-  const purpose = String(req.body.purpose || "").toLowerCase();
-  const otp = String(req.body.otp || "").trim();
-
-  if (
-    !identifier ||
-    !otp ||
-    !OTP_CHANNELS.has(channel) ||
-    !OTP_PURPOSES.has(purpose)
-  ) {
-    res.status(400).json({
-      message: "identifier, channel, purpose, and otp are required.",
-    });
-    return;
-  }
-
-  const db = readDb();
-  const user = getUserByIdentifier(db, identifier);
-  if (!user) {
-    res.status(404).json({ message: "User not found." });
-    return;
-  }
-
-  if (purpose === "email_verification" && channel !== "email") {
-    res
-      .status(400)
-      .json({ message: "Email verification requires channel=email." });
-    return;
-  }
-
-  if (purpose === "mobile_verification" && channel !== "mobile") {
-    res
-      .status(400)
-      .json({ message: "Mobile verification requires channel=mobile." });
-    return;
-  }
-
-  const secret =
-    channel === "email" ? user.otpSecrets.email : user.otpSecrets.mobile;
-  const isValid = verifyTotp(secret, otp);
-  if (!isValid) {
-    res.status(400).json({ message: "Invalid or expired OTP." });
-    return;
-  }
-
-  if (purpose === "email_verification") {
-    user.isEmailVerified = true;
-  }
-
-  if (purpose === "mobile_verification") {
-    user.isMobileVerified = true;
-  }
-
-  user.updatedAt = new Date().toISOString();
-
-  appendAuditLog(db, {
-    actorUserId: user.id,
-    action: "OTP_VERIFIED",
-    targetUserId: user.id,
-    metadata: { channel, purpose },
-  });
-  writeDb(db);
-
-  res.json({
-    message: "OTP verified successfully.",
-    verification: {
-      isEmailVerified: Boolean(user.isEmailVerified),
-      isMobileVerified: Boolean(user.isMobileVerified),
-    },
+app.post("/api/auth/verify-otp", (_, res) => {
+  res.status(410).json({
+    message:
+      "Email/SMS OTP is disabled. Use authenticator app (TOTP) for login and high-risk actions.",
   });
 });
 
 app.post("/api/auth/login", (req, res) => {
   const identifier = String(req.body.identifier || "").trim();
   const password = String(req.body.password || "");
-  const channel = String(req.body.channel || "email").toLowerCase();
-  const otp = String(req.body.otp || "").trim();
+  const otp = normalizeTotpCode(req.body.totp || req.body.otp);
 
-  if (!identifier || !password || !OTP_CHANNELS.has(channel)) {
+  if (!identifier || !password) {
     res.status(400).json({
-      message: "identifier, password, and a valid channel are required.",
+      message: "identifier and password are required.",
     });
     return;
   }
@@ -658,35 +580,99 @@ app.post("/api/auth/login", (req, res) => {
     return;
   }
 
-  if (!otp) {
-    saveAndRespondOtpResult({
-      db,
-      user,
-      channel,
-      purpose: "login",
+  const totpState = ensureUserTotpState(user);
+
+  if (!totpState.isEnabled || !totpState.secret) {
+    if (!totpState.pendingSecret) {
+      totpState.pendingSecret = generateOtpSecret();
+      totpState.pendingIssuedAt = new Date().toISOString();
+      user.updatedAt = totpState.pendingIssuedAt;
+
+      appendAuditLog(db, {
+        actorUserId: user.id,
+        action: "TOTP_SETUP_INITIATED",
+        targetUserId: user.id,
+        metadata: { flow: "login" },
+      });
+      writeDb(db);
+    }
+
+    if (!otp) {
+      res.json({
+        message:
+          "Authenticator setup is required. Scan the QR code and enter the 6-digit code.",
+        nextStep: "totp_setup",
+        totpSetup: buildTotpSetupPayload(user, totpState.pendingSecret),
+      });
+      return;
+    }
+
+    if (!verifyTotp(totpState.pendingSecret, otp)) {
+      res.status(401).json({
+        message: "Invalid authenticator code. Complete setup and try again.",
+      });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    totpState.secret = totpState.pendingSecret;
+    totpState.pendingSecret = "";
+    totpState.pendingIssuedAt = null;
+    totpState.isEnabled = true;
+    totpState.lastVerifiedAt = now;
+    user.lastLoginAt = now;
+    user.updatedAt = now;
+
+    appendAuditLog(db, {
       actorUserId: user.id,
-      action: "LOGIN_OTP_REQUESTED",
-      res,
+      action: "TOTP_SETUP_COMPLETED",
+      targetUserId: user.id,
+      metadata: { flow: "login" },
+    });
+    appendAuditLog(db, {
+      actorUserId: user.id,
+      action: "USER_LOGIN_SUCCESS",
+      targetUserId: user.id,
+      metadata: { method: "totp_setup" },
+    });
+    writeDb(db);
+
+    const token = signAuthToken({
+      sub: user.id,
+      role: user.role,
+    });
+
+    res.json({
+      token,
+      user: safeUserResponse(user),
+      message: "Authenticator setup completed. Login successful.",
     });
     return;
   }
 
-  const secret =
-    channel === "email" ? user.otpSecrets.email : user.otpSecrets.mobile;
-  const otpValid = verifyTotp(secret, otp);
-  if (!otpValid) {
-    res.status(401).json({ message: "Invalid or expired OTP." });
+  if (!otp) {
+    res.json({
+      message: "Enter your authenticator app code to login.",
+      nextStep: "totp_verify",
+    });
     return;
   }
 
-  user.lastLoginAt = new Date().toISOString();
-  user.updatedAt = user.lastLoginAt;
+  if (!verifyUserTotp(user, otp)) {
+    res.status(401).json({ message: "Invalid or expired authenticator code." });
+    return;
+  }
+
+  const now = new Date().toISOString();
+  totpState.lastVerifiedAt = now;
+  user.lastLoginAt = now;
+  user.updatedAt = now;
 
   appendAuditLog(db, {
     actorUserId: user.id,
     action: "USER_LOGIN_SUCCESS",
     targetUserId: user.id,
-    metadata: { channel },
+    metadata: { method: "totp" },
   });
   writeDb(db);
 
@@ -703,11 +689,10 @@ app.post("/api/auth/login", (req, res) => {
 
 app.post("/api/auth/password-reset/request", (req, res) => {
   const identifier = String(req.body.identifier || "").trim();
-  const channel = String(req.body.channel || "email").toLowerCase();
 
-  if (!identifier || !OTP_CHANNELS.has(channel)) {
+  if (!identifier) {
     res.status(400).json({
-      message: "identifier and channel (email/mobile) are required.",
+      message: "identifier is required.",
     });
     return;
   }
@@ -724,26 +709,37 @@ app.post("/api/auth/password-reset/request", (req, res) => {
     return;
   }
 
-  saveAndRespondOtpResult({
-    db,
-    user,
-    channel,
-    purpose: "password_reset",
+  const totpState = ensureUserTotpState(user);
+  if (!totpState.isEnabled || !totpState.secret) {
+    res.status(400).json({
+      message:
+        "Authenticator app is not set up for this account. Login and complete setup first.",
+    });
+    return;
+  }
+
+  appendAuditLog(db, {
     actorUserId: user.id,
-    action: "PASSWORD_RESET_OTP_REQUESTED",
-    res,
+    action: "PASSWORD_RESET_TOTP_CHALLENGE_REQUESTED",
+    targetUserId: user.id,
+    metadata: { method: "totp" },
+  });
+  writeDb(db);
+
+  res.json({
+    message:
+      "Use your authenticator app code with new password to complete reset.",
   });
 });
 
 app.post("/api/auth/password-reset/confirm", (req, res) => {
   const identifier = String(req.body.identifier || "").trim();
-  const channel = String(req.body.channel || "email").toLowerCase();
-  const otp = String(req.body.otp || "").trim();
+  const otp = normalizeTotpCode(req.body.totp || req.body.otp);
   const newPassword = String(req.body.newPassword || "");
 
-  if (!identifier || !otp || !OTP_CHANNELS.has(channel) || !newPassword) {
+  if (!identifier || !otp || !newPassword) {
     res.status(400).json({
-      message: "identifier, channel, otp, and newPassword are required.",
+      message: "identifier, totp, and newPassword are required.",
     });
     return;
   }
@@ -768,21 +764,21 @@ app.post("/api/auth/password-reset/confirm", (req, res) => {
     return;
   }
 
-  const secret =
-    channel === "email" ? user.otpSecrets.email : user.otpSecrets.mobile;
-  if (!verifyTotp(secret, otp)) {
-    res.status(401).json({ message: "Invalid or expired OTP." });
+  if (!verifyUserTotp(user, otp)) {
+    res.status(401).json({ message: "Invalid or expired authenticator code." });
     return;
   }
 
+  const totpState = ensureUserTotpState(user);
   user.passwordHash = hashPassword(newPassword);
   user.updatedAt = new Date().toISOString();
+  totpState.lastVerifiedAt = user.updatedAt;
 
   appendAuditLog(db, {
     actorUserId: user.id,
     action: "PASSWORD_RESET_COMPLETED",
     targetUserId: user.id,
-    metadata: { channel },
+    metadata: { method: "totp" },
   });
   writeDb(db);
 
@@ -978,20 +974,26 @@ app.post("/api/resume/request-download-otp", requireAuth, (req, res) => {
     return;
   }
 
-  const channel = String(req.body.channel || "email").toLowerCase();
-  if (!OTP_CHANNELS.has(channel)) {
-    res.status(400).json({ message: "channel must be email or mobile." });
+  const totpState = ensureUserTotpState(user);
+  if (!totpState.isEnabled || !totpState.secret) {
+    res.status(400).json({
+      message:
+        "Authenticator app is not set up for this account. Login and complete setup first.",
+    });
     return;
   }
 
-  saveAndRespondOtpResult({
-    db,
-    user,
-    channel,
-    purpose: "resume_download",
+  appendAuditLog(db, {
     actorUserId: user.id,
-    action: "RESUME_DOWNLOAD_OTP_REQUESTED",
-    res,
+    action: "RESUME_DOWNLOAD_TOTP_CHALLENGE_REQUESTED",
+    targetUserId: user.id,
+    metadata: { method: "totp" },
+  });
+  writeDb(db);
+
+  res.json({
+    message:
+      "Use your authenticator app code to continue with resume download.",
   });
 });
 
@@ -1045,12 +1047,11 @@ app.post("/api/resume/grant-access", requireAuth, (req, res) => {
 });
 
 app.post("/api/resume/download", requireAuth, (req, res) => {
-  const channel = String(req.body.channel || "email").toLowerCase();
-  const otp = String(req.body.otp || "").trim();
+  const otp = normalizeTotpCode(req.body.totp || req.body.otp);
   const targetUserId = String(req.body.targetUserId || "").trim();
 
-  if (!OTP_CHANNELS.has(channel) || !otp) {
-    res.status(400).json({ message: "channel and otp are required." });
+  if (!otp) {
+    res.status(400).json({ message: "totp is required." });
     return;
   }
 
@@ -1081,12 +1082,14 @@ app.post("/api/resume/download", requireAuth, (req, res) => {
     }
   }
 
-  const secret =
-    channel === "email" ? requester.otpSecrets.email : requester.otpSecrets.mobile;
-  if (!verifyTotp(secret, otp)) {
-    res.status(401).json({ message: "Invalid or expired OTP." });
+  if (!verifyUserTotp(requester, otp)) {
+    res.status(401).json({ message: "Invalid or expired authenticator code." });
     return;
   }
+
+  const requesterTotp = ensureUserTotpState(requester);
+  requesterTotp.lastVerifiedAt = new Date().toISOString();
+  requester.updatedAt = requesterTotp.lastVerifiedAt;
 
   const encryptedPath = path.join(RESUME_DIR, owner.resume.storageName);
   if (!fs.existsSync(encryptedPath)) {
@@ -1105,7 +1108,7 @@ app.post("/api/resume/download", requireAuth, (req, res) => {
     actorUserId: requester.id,
     action: "RESUME_DOWNLOADED",
     targetUserId: owner.id,
-    metadata: { channel },
+    metadata: { method: "totp" },
   });
   writeDb(db);
 
@@ -1120,12 +1123,6 @@ app.post("/api/resume/download", requireAuth, (req, res) => {
 });
 
 app.post("/api/account/request-deletion-otp", requireAuth, (req, res) => {
-  const channel = String(req.body.channel || "email").toLowerCase();
-  if (!OTP_CHANNELS.has(channel)) {
-    res.status(400).json({ message: "channel must be email or mobile." });
-    return;
-  }
-
   const db = readDb();
   const user = db.users.find((item) => item.id === req.auth.userId);
   if (!user) {
@@ -1133,23 +1130,33 @@ app.post("/api/account/request-deletion-otp", requireAuth, (req, res) => {
     return;
   }
 
-  saveAndRespondOtpResult({
-    db,
-    user,
-    channel,
-    purpose: "account_deletion",
+  const totpState = ensureUserTotpState(user);
+  if (!totpState.isEnabled || !totpState.secret) {
+    res.status(400).json({
+      message:
+        "Authenticator app is not set up for this account. Login and complete setup first.",
+    });
+    return;
+  }
+
+  appendAuditLog(db, {
     actorUserId: user.id,
-    action: "ACCOUNT_DELETION_OTP_REQUESTED",
-    res,
+    action: "ACCOUNT_DELETION_TOTP_CHALLENGE_REQUESTED",
+    targetUserId: user.id,
+    metadata: { method: "totp" },
+  });
+  writeDb(db);
+
+  res.json({
+    message: "Use your authenticator app code to confirm account deletion.",
   });
 });
 
 app.post("/api/account/delete", requireAuth, (req, res) => {
-  const channel = String(req.body.channel || "email").toLowerCase();
-  const otp = String(req.body.otp || "").trim();
+  const otp = normalizeTotpCode(req.body.totp || req.body.otp);
 
-  if (!OTP_CHANNELS.has(channel) || !otp) {
-    res.status(400).json({ message: "channel and otp are required." });
+  if (!otp) {
+    res.status(400).json({ message: "totp is required." });
     return;
   }
 
@@ -1160,10 +1167,8 @@ app.post("/api/account/delete", requireAuth, (req, res) => {
     return;
   }
 
-  const secret =
-    channel === "email" ? user.otpSecrets.email : user.otpSecrets.mobile;
-  if (!verifyTotp(secret, otp)) {
-    res.status(401).json({ message: "Invalid or expired OTP." });
+  if (!verifyUserTotp(user, otp)) {
+    res.status(401).json({ message: "Invalid or expired authenticator code." });
     return;
   }
 
@@ -1177,7 +1182,7 @@ app.post("/api/account/delete", requireAuth, (req, res) => {
     actorUserId: req.auth.userId,
     action: "ACCOUNT_SELF_DELETED",
     targetUserId: req.auth.userId,
-    metadata: { channel },
+    metadata: { method: "totp" },
   });
   writeDb(db);
 
@@ -1187,9 +1192,10 @@ app.post("/api/account/delete", requireAuth, (req, res) => {
 app.get("/api/admin/overview", requireAuth, requireRole(["admin"]), (req, res) => {
   const db = readDb();
   const totalUsers = db.users.length;
-  const verifiedUsers = db.users.filter(
-    (user) => user.isEmailVerified && user.isMobileVerified
-  ).length;
+  const verifiedUsers = db.users.filter((user) => {
+    const totp = ensureUserTotpState(user);
+    return Boolean(totp.isEnabled && totp.secret);
+  }).length;
   const recruiterUsers = db.users.filter((user) => user.role === "recruiter").length;
   const suspendedUsers = db.users.filter((user) => user.isSuspended).length;
   const resumesUploaded = db.users.filter((user) => Boolean(user.resume)).length;
@@ -1330,6 +1336,7 @@ app.use((_, res) => {
 
 ensureDirectories();
 ensureDefaultAdminAccount();
+migrateUsersToTotpIfNeeded();
 
 app.listen(PORT, () => {
   console.log(`Backend running on port ${PORT}`);

@@ -290,6 +290,23 @@ textarea:focus {
   gap: 0.55rem;
 }
 
+.totp-setup-card {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.8rem;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(143, 185, 236, 0.28);
+  background: rgba(9, 18, 31, 0.62);
+}
+
+.totp-qr {
+  width: 180px;
+  height: 180px;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(143, 185, 236, 0.28);
+  background: #fff;
+}
+
 .workspace {
   margin-top: 1rem;
 }

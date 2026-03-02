@@ -14,7 +14,8 @@ module.exports = {
   DB_FILE,
   PORT: Number(process.env.PORT || 5000),
   CORS_ORIGIN: process.env.CORS_ORIGIN || "*",
-  OTP_STEP_SECONDS: Number(process.env.OTP_STEP_SECONDS || 300),
+  OTP_STEP_SECONDS: Number(process.env.OTP_STEP_SECONDS || 30),
   OTP_WINDOW: Number(process.env.OTP_WINDOW || 1),
+  TOTP_ISSUER: process.env.TOTP_ISSUER || "Damera Corp. Careers Portal",
   JWT_EXPIRY: process.env.JWT_EXPIRY || "2h",
 };
