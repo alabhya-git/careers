@@ -1,6 +1,9 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import "./App.css";
+import OpportunityHub from "./components/OpportunityHub";
+import HiringHub from "./components/HiringHub";
+import MessagingHub from "./components/MessagingHub";
 
 const API_BASE = process.env.REACT_APP_API_BASE_URL || "http://localhost:5000";
 const LOCAL_TOKEN_KEY = "job_portal_token";
@@ -1117,11 +1120,34 @@ function App() {
             </button>
             <button
               type="button"
+              className={`tab ${activeTab === "opportunities" ? "active" : ""}`}
+              onClick={() => setActiveTab("opportunities")}
+            >
+              Opportunities
+            </button>
+            <button
+              type="button"
+              className={`tab ${activeTab === "messages" ? "active" : ""}`}
+              onClick={() => setActiveTab("messages")}
+            >
+              Messages
+            </button>
+            <button
+              type="button"
               className={`tab ${activeTab === "security" ? "active" : ""}`}
               onClick={() => setActiveTab("security")}
             >
               Security
             </button>
+            {["recruiter", "admin"].includes(currentUser.role) && (
+              <button
+                type="button"
+                className={`tab ${activeTab === "hiring" ? "active" : ""}`}
+                onClick={() => setActiveTab("hiring")}
+              >
+                Hiring
+              </button>
+            )}
             {currentUser.role === "admin" && (
               <button
                 type="button"
@@ -1423,11 +1449,40 @@ function App() {
             </section>
           )}
 
+          {activeTab === "opportunities" && (
+            <OpportunityHub
+              request={request}
+              currentUser={currentUser}
+              onStatus={setStatusMessage}
+              onError={setErrorMessage}
+              clearFeedback={clearFeedback}
+            />
+          )}
+
+          {activeTab === "messages" && (
+            <MessagingHub
+              request={request}
+              currentUser={currentUser}
+              onStatus={setStatusMessage}
+              onError={setErrorMessage}
+              clearFeedback={clearFeedback}
+            />
+          )}
+
+          {activeTab === "hiring" && ["recruiter", "admin"].includes(currentUser.role) && (
+            <HiringHub
+              request={request}
+              onStatus={setStatusMessage}
+              onError={setErrorMessage}
+              clearFeedback={clearFeedback}
+            />
+          )}
+
           {activeTab === "admin" && currentUser.role === "admin" && (
             <section className="panel wide">
               <h2>Admin Dashboard</h2>
 
-              <div className="kpi-grid">
+              <div className="kpi-grid kpi-grid-wide">
                 <div className="kpi">
                   <span>Total Users</span>
                   <strong>{adminTotals.totalUsers || 0}</strong>
@@ -1447,6 +1502,26 @@ function App() {
                 <div className="kpi">
                   <span>Resumes</span>
                   <strong>{adminTotals.resumesUploaded || 0}</strong>
+                </div>
+                <div className="kpi">
+                  <span>Companies</span>
+                  <strong>{adminTotals.totalCompanies || 0}</strong>
+                </div>
+                <div className="kpi">
+                  <span>Jobs</span>
+                  <strong>{adminTotals.totalJobs || 0}</strong>
+                </div>
+                <div className="kpi">
+                  <span>Applications</span>
+                  <strong>{adminTotals.totalApplications || 0}</strong>
+                </div>
+                <div className="kpi">
+                  <span>Conversations</span>
+                  <strong>{adminTotals.totalConversations || 0}</strong>
+                </div>
+                <div className="kpi">
+                  <span>Messages</span>
+                  <strong>{adminTotals.totalMessages || 0}</strong>
                 </div>
               </div>
 
@@ -1494,6 +1569,23 @@ function App() {
                     ))}
                   </tbody>
                 </table>
+              </div>
+
+              <div className="card-stack">
+                {(adminOverview?.audit?.recent || []).map((entry) => (
+                  <article key={entry.id} className="summary-card">
+                    <div className="job-card-header">
+                      <div>
+                        <h4>{entry.action}</h4>
+                        <p>{formatDate(entry.timestamp)}</p>
+                      </div>
+                      <span className="badge">{entry.actorUserId || "system"}</span>
+                    </div>
+                    <pre className="log-preview">
+                      {JSON.stringify(entry.metadata || {}, null, 2)}
+                    </pre>
+                  </article>
+                ))}
               </div>
             </section>
           )}
