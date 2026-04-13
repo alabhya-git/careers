@@ -145,21 +145,22 @@ function verifyAuditChain(logs) {
           valid: false,
           brokenAt: index,
           chainVersion,
+          blockchainVersion: current.blockchainVersion || null,
           reason: "Signed audit entry failed signature verification.",
         };
       }
-      continue;
-    }
-
-    const legacyValid =
-      current.prevHash === expectedPrev && current.hash === legacyExpectedHash;
-    if (!legacyValid) {
-      return {
-        valid: false,
-        brokenAt: index,
-        chainVersion: "LEGACY_SHA256_V1",
-        reason: "Legacy audit entry hash mismatch.",
-      };
+    } else {
+      const legacyValid =
+        current.prevHash === expectedPrev && current.hash === legacyExpectedHash;
+      if (!legacyValid) {
+        return {
+          valid: false,
+          brokenAt: index,
+          chainVersion: "LEGACY_SHA256_V1",
+          blockchainVersion: current.blockchainVersion || null,
+          reason: "Legacy audit entry hash mismatch.",
+        };
+      }
     }
 
     if (current.blockchainVersion === BLOCKCHAIN_VERSION) {
