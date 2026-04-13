@@ -241,10 +241,6 @@ function ensureUserTotpState(user) {
     user.totp.isEnabled = true;
   }
 
-  if (typeof user.markModified === "function") {
-    user.markModified("totp");
-  }
-
   return user.totp;
 }
 
