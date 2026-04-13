@@ -1,6 +1,7 @@
 const { v4: uuidv4 } = require("uuid");
 const { appendAuditLog } = require("../audit");
-const { readDb, writeDb } = require("../store");
+const User = require("../models/User");
+const Conversation = require("../models/Conversation");
 const {
   CONVERSATION_TYPES,
   MAX_GROUP_MEMBERS,
@@ -15,9 +16,8 @@ const {
 } = require("../portal-helpers");
 
 function registerMessagingRoutes(app) {
-  app.get("/api/messaging/identity", requireAuth, (req, res) => {
-    const db = readDb();
-    const user = db.users.find((item) => item.id === req.auth.userId);
+  app.get("/api/messaging/identity", requireAuth, async (req, res) => {
+    const user = await User.findOne({ id: req.auth.userId });
     if (!user) {
       res.status(404).json({ message: "User not found." });
       return;
@@ -32,7 +32,7 @@ function registerMessagingRoutes(app) {
     });
   });
 
-  app.post("/api/messaging/identity", requireAuth, (req, res) => {
+  app.post("/api/messaging/identity", requireAuth, async (req, res) => {
     const publicKey = req.body.publicKey;
     const encryptedPrivateKey = req.body.encryptedPrivateKey;
     const algorithm = sanitizeText(req.body.algorithm || "RSA-OAEP", 60);
@@ -52,8 +52,7 @@ function registerMessagingRoutes(app) {
       return;
     }
 
-    const db = readDb();
-    const user = db.users.find((item) => item.id === req.auth.userId);
+    const user = await User.findOne({ id: req.auth.userId });
     if (!user) {
       res.status(404).json({ message: "User not found." });
       return;
@@ -64,13 +63,14 @@ function registerMessagingRoutes(app) {
     user.messaging.algorithm = algorithm || "RSA-OAEP";
     user.messaging.updatedAt = new Date().toISOString();
     user.updatedAt = user.messaging.updatedAt;
-    appendAuditLog(db, {
+    user.markModified("messaging");
+    await appendAuditLog({
       actorUserId: user.id,
       action: "MESSAGING_IDENTITY_UPSERTED",
       targetUserId: user.id,
       metadata: { algorithm: user.messaging.algorithm },
     });
-    writeDb(db);
+    await user.save();
 
     res.status(201).json({
       message: "Messaging identity saved.",
@@ -82,42 +82,30 @@ function registerMessagingRoutes(app) {
     });
   });
 
-  app.get("/api/messaging/directory", requireAuth, (req, res) => {
-    const db = readDb();
-    const user = db.users.find((item) => item.id === req.auth.userId);
+  app.get("/api/messaging/directory", requireAuth, async (req, res) => {
+    const user = await User.findOne({ id: req.auth.userId });
     if (!user) {
       res.status(404).json({ message: "User not found." });
       return;
     }
 
-    res.json({ contacts: getMessagingDirectory(db, user) });
+    res.json({ contacts: await getMessagingDirectory(user) });
   });
 
-  app.get("/api/messaging/conversations", requireAuth, (req, res) => {
-    const db = readDb();
-    const conversations = db.conversations
-      .filter(
-        (conversation) =>
-          Array.isArray(conversation.memberUserIds) &&
-          conversation.memberUserIds.includes(req.auth.userId)
-      )
-      .sort((left, right) => {
-        const rightDate = new Date(
-          right.lastMessageAt || right.updatedAt || right.createdAt || 0
-        ).getTime();
-        const leftDate = new Date(
-          left.lastMessageAt || left.updatedAt || left.createdAt || 0
-        ).getTime();
-        return rightDate - leftDate;
-      })
-      .map((conversation) => serializeConversation(db, conversation, req.auth.userId));
+  app.get("/api/messaging/conversations", requireAuth, async (req, res) => {
+    const conversations = await Conversation.find({
+      memberUserIds: req.auth.userId,
+    }).sort({ lastMessageAt: -1, updatedAt: -1, createdAt: -1 });
 
-    res.json({ conversations });
+    const serializedConversations = await Promise.all(
+      conversations.map((conversation) => serializeConversation(conversation, req.auth.userId))
+    );
+
+    res.json({ conversations: serializedConversations });
   });
 
-  app.post("/api/messaging/conversations", requireAuth, (req, res) => {
-    const db = readDb();
-    const actor = db.users.find((item) => item.id === req.auth.userId);
+  app.post("/api/messaging/conversations", requireAuth, async (req, res) => {
+    const actor = await User.findOne({ id: req.auth.userId });
     if (!actor) {
       res.status(404).json({ message: "User not found." });
       return;
@@ -157,7 +145,8 @@ function registerMessagingRoutes(app) {
       return;
     }
 
-    const allowedContactIds = new Set(getMessagingDirectory(db, actor).map((user) => user.id));
+    const directory = await getMessagingDirectory(actor);
+    const allowedContactIds = new Set(directory.map((user) => user.id));
     const invalidMember = memberUserIds.find(
       (userId) => userId !== actor.id && !allowedContactIds.has(userId)
     );
@@ -168,16 +157,15 @@ function registerMessagingRoutes(app) {
       return;
     }
 
-    const membersWithoutKeys = memberUserIds.find((userId) => {
-      const candidate = db.users.find((user) => user.id === userId);
-      return !candidate || !safeMessagingStatus(candidate).isConfigured;
-    });
-    if (membersWithoutKeys) {
-      res.status(400).json({
-        message:
-          "Every participant must configure messaging encryption before joining a conversation.",
-      });
-      return;
+    for (const userId of memberUserIds) {
+      const candidate = await User.findOne({ id: userId });
+      if (!candidate || !safeMessagingStatus(candidate).isConfigured) {
+        res.status(400).json({
+          message:
+            "Every participant must configure messaging encryption before joining a conversation.",
+        });
+        return;
+      }
     }
 
     const participantKeyMap = new Map();
@@ -200,29 +188,22 @@ function registerMessagingRoutes(app) {
 
     if (type === "direct") {
       const sortedMembers = [...memberUserIds].sort();
-      const existingConversation = db.conversations.find((conversation) => {
-        const sortedExistingMembers = Array.isArray(conversation.memberUserIds)
-          ? [...conversation.memberUserIds].sort()
-          : [];
-        return (
-          conversation.type === "direct" &&
-          sortedExistingMembers.length === 2 &&
-          sortedExistingMembers[0] === sortedMembers[0] &&
-          sortedExistingMembers[1] === sortedMembers[1]
-        );
+      const existingConversation = await Conversation.findOne({
+        type: "direct",
+        memberUserIds: { $all: sortedMembers, $size: 2 },
       });
 
       if (existingConversation) {
         res.json({
           message: "Conversation already exists.",
-          conversation: serializeConversation(db, existingConversation, actor.id),
+          conversation: await serializeConversation(existingConversation, actor.id),
         });
         return;
       }
     }
 
     const timestamp = new Date().toISOString();
-    const conversation = {
+    const conversation = new Conversation({
       id: uuidv4(),
       type,
       title: type === "group" ? title : "",
@@ -236,10 +217,10 @@ function registerMessagingRoutes(app) {
       createdAt: timestamp,
       updatedAt: timestamp,
       lastMessageAt: null,
-    };
+    });
 
-    db.conversations.push(conversation);
-    appendAuditLog(db, {
+    await conversation.save();
+    await appendAuditLog({
       actorUserId: actor.id,
       action: "CONVERSATION_CREATED",
       targetUserId: actor.id,
@@ -249,18 +230,15 @@ function registerMessagingRoutes(app) {
         memberCount: memberUserIds.length,
       },
     });
-    writeDb(db);
 
     res.status(201).json({
       message: "Encrypted conversation created.",
-      conversation: serializeConversation(db, conversation, actor.id),
+      conversation: await serializeConversation(conversation, actor.id),
     });
   });
 
-  app.get("/api/messaging/conversations/:conversationId/messages", requireAuth, (req, res) => {
-    const db = readDb();
-    const conversation = findConversationById(
-      db,
+  app.get("/api/messaging/conversations/:conversationId/messages", requireAuth, async (req, res) => {
+    const conversation = await findConversationById(
       sanitizeText(req.params.conversationId, 80)
     );
     if (!conversation) {
@@ -275,15 +253,19 @@ function registerMessagingRoutes(app) {
       return;
     }
 
+    const serializedMsgs = await Promise.all(
+      (Array.isArray(conversation.messages) ? conversation.messages : []).map(
+        (message) => serializeEncryptedMessage(message)
+      )
+    );
+
     res.json({
-      conversation: serializeConversation(db, conversation, req.auth.userId),
-      messages: (Array.isArray(conversation.messages) ? conversation.messages : []).map(
-        (message) => serializeEncryptedMessage(db, message)
-      ),
+      conversation: await serializeConversation(conversation, req.auth.userId),
+      messages: serializedMsgs,
     });
   });
 
-  app.post("/api/messaging/conversations/:conversationId/messages", requireAuth, (req, res) => {
+  app.post("/api/messaging/conversations/:conversationId/messages", requireAuth, async (req, res) => {
     const ciphertext = sanitizeText(req.body.ciphertext, 32000);
     const iv = sanitizeText(req.body.iv, 300);
     const algorithm = sanitizeText(req.body.algorithm || "AES-GCM", 80);
@@ -293,9 +275,7 @@ function registerMessagingRoutes(app) {
       return;
     }
 
-    const db = readDb();
-    const conversation = findConversationById(
-      db,
+    const conversation = await findConversationById(
       sanitizeText(req.params.conversationId, 80)
     );
     if (!conversation) {
@@ -326,7 +306,8 @@ function registerMessagingRoutes(app) {
     conversation.messages.push(message);
     conversation.updatedAt = now;
     conversation.lastMessageAt = now;
-    appendAuditLog(db, {
+    conversation.markModified("messages");
+    await appendAuditLog({
       actorUserId: req.auth.userId,
       action: "ENCRYPTED_MESSAGE_SENT",
       targetUserId: req.auth.userId,
@@ -336,11 +317,11 @@ function registerMessagingRoutes(app) {
         members: conversation.memberUserIds.length,
       },
     });
-    writeDb(db);
+    await conversation.save();
 
     res.status(201).json({
       message: "Encrypted message stored.",
-      encryptedMessage: serializeEncryptedMessage(db, message),
+      encryptedMessage: await serializeEncryptedMessage(message),
     });
   });
 }

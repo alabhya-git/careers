@@ -3,7 +3,12 @@ const path = require("path");
 const { v4: uuidv4 } = require("uuid");
 const { RESUME_DIR, OTP_STEP_SECONDS, TOTP_ISSUER } = require("./config");
 const { appendAuditLog } = require("./audit");
-const { readDb, writeDb } = require("./store");
+const User = require("./models/User");
+const Company = require("./models/Company");
+const Job = require("./models/Job");
+const Application = require("./models/Application");
+const Conversation = require("./models/Conversation");
+const AuditLog = require("./models/AuditLog");
 const { hashPassword, verifyTotp, verifyAuthToken } = require("./security");
 
 const PROFILE_PRIVACY_OPTIONS = new Set(["public", "connections", "private"]);
@@ -344,7 +349,7 @@ function directoryUserPreview(user) {
   };
 }
 
-function getUserByIdentifier(db, identifier) {
+async function getUserByIdentifier(identifier) {
   const rawIdentifier = String(identifier || "").trim();
   if (!rawIdentifier) {
     return null;
@@ -353,33 +358,36 @@ function getUserByIdentifier(db, identifier) {
   const normalizedEmail = normalizeEmail(rawIdentifier);
   const normalizedMobile = normalizeMobile(rawIdentifier);
 
-  return (
-    db.users.find((user) => user.id === rawIdentifier) ||
-    db.users.find((user) => user.email === normalizedEmail) ||
-    db.users.find((user) => user.mobile === normalizedMobile)
-  );
+  return await User.findOne({
+    $or: [
+      { id: rawIdentifier },
+      { email: normalizedEmail },
+      { mobile: normalizedMobile },
+    ],
+  });
 }
 
-function getManagedCompanyIds(db, user) {
+async function getManagedCompanyIds(user) {
   if (!user) {
     return [];
   }
 
+  let companies;
   if (user.role === "admin") {
-    return db.companies.map((company) => company.id);
+    companies = await Company.find({}, "id");
+  } else {
+    companies = await Company.find({
+      $or: [
+        { createdByUserId: user.id },
+        { adminUserIds: user.id },
+      ],
+    }, "id");
   }
 
-  return db.companies
-    .filter((company) => {
-      const adminUserIds = Array.isArray(company.adminUserIds)
-        ? company.adminUserIds
-        : [];
-      return company.createdByUserId === user.id || adminUserIds.includes(user.id);
-    })
-    .map((company) => company.id);
+  return companies.map((company) => company.id);
 }
 
-function canManageCompany(db, user, company) {
+function canManageCompany(user, company) {
   if (!user || !company) {
     return false;
   }
@@ -395,27 +403,28 @@ function canManageCompany(db, user, company) {
   return company.createdByUserId === user.id || adminUserIds.includes(user.id);
 }
 
-function getCompanyById(db, companyId) {
-  return db.companies.find((company) => company.id === companyId) || null;
+async function getCompanyById(companyId) {
+  return await Company.findOne({ id: companyId });
 }
 
-function getJobById(db, jobId) {
-  return db.jobs.find((job) => job.id === jobId) || null;
+async function getJobById(jobId) {
+  return await Job.findOne({ id: jobId });
 }
 
-function getApplicationById(db, applicationId) {
-  return db.applications.find((item) => item.id === applicationId) || null;
+async function getApplicationById(applicationId) {
+  return await Application.findOne({ id: applicationId });
 }
 
-function createUniqueCompanySlug(db, name, excludeCompanyId = null) {
+async function createUniqueCompanySlug(name, excludeCompanyId = null) {
   const baseSlug = slugify(name);
   let candidate = baseSlug;
   let suffix = 2;
 
   while (
-    db.companies.some(
-      (company) => company.slug === candidate && company.id !== excludeCompanyId
-    )
+    await Company.exists({
+      slug: candidate,
+      id: { $ne: excludeCompanyId },
+    })
   ) {
     candidate = `${baseSlug}-${suffix}`;
     suffix += 1;
@@ -424,7 +433,7 @@ function createUniqueCompanySlug(db, name, excludeCompanyId = null) {
   return candidate;
 }
 
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   const authorizationHeader = req.headers.authorization || "";
   if (!authorizationHeader.startsWith("Bearer ")) {
     res.status(401).json({ message: "Missing Bearer token." });
@@ -435,8 +444,7 @@ function requireAuth(req, res, next) {
     const payload = verifyAuthToken(
       authorizationHeader.slice("Bearer ".length)
     );
-    const db = readDb();
-    const user = db.users.find((item) => item.id === payload.sub);
+    const user = await User.findOne({ id: payload.sub });
     if (!user) {
       res.status(401).json({ message: "User for this token no longer exists." });
       return;
@@ -464,11 +472,13 @@ function requireRole(roles) {
   };
 }
 
-function serializeCompany(db, company, viewer = null) {
-  const jobs = db.jobs.filter((job) => job.companyId === company.id);
+async function serializeCompany(company, viewer = null) {
+  const jobs = await Job.find({ companyId: company.id });
   const openJobs = jobs.filter(
     (job) => job.status === "open" && !isDeadlinePassed(job.applicationDeadline)
   );
+
+  const adminUsers = await User.find({ id: { $in: company.adminUserIds || [] } });
 
   return {
     id: company.id,
@@ -480,23 +490,19 @@ function serializeCompany(db, company, viewer = null) {
     createdByUserId: company.createdByUserId || null,
     createdAt: company.createdAt,
     updatedAt: company.updatedAt,
-    admins: (Array.isArray(company.adminUserIds) ? company.adminUserIds : [])
-      .map((userId) => directoryUserPreview(db.users.find((user) => user.id === userId)))
-      .filter(Boolean),
+    admins: adminUsers.map((user) => directoryUserPreview(user)).filter(Boolean),
     counts: {
       totalJobs: jobs.length,
       openJobs: openJobs.length,
     },
-    canManage: canManageCompany(db, viewer, company),
+    canManage: canManageCompany(viewer, company),
   };
 }
 
-function serializeJob(db, job, viewer = null) {
-  const company = getCompanyById(db, job.companyId);
-  const applicantCount = db.applications.filter(
-    (application) => application.jobId === job.id
-  ).length;
-  const canManage = canManageCompany(db, viewer, company);
+async function serializeJob(job, viewer = null) {
+  const company = await getCompanyById(job.companyId);
+  const applicantCount = await Application.countDocuments({ jobId: job.id });
+  const canManage = canManageCompany(viewer, company);
 
   return {
     id: job.id,
@@ -529,12 +535,12 @@ function serializeJob(db, job, viewer = null) {
   };
 }
 
-function serializeApplication(db, application, viewer = null) {
-  const applicant = db.users.find((user) => user.id === application.applicantUserId);
-  const job = getJobById(db, application.jobId);
-  const company = job ? getCompanyById(db, job.companyId) : null;
+async function serializeApplication(application, viewer = null) {
+  const applicant = await User.findOne({ id: application.applicantUserId });
+  const job = await getJobById(application.jobId);
+  const company = job ? await getCompanyById(job.companyId) : null;
   const viewerIsApplicant = viewer && viewer.id === application.applicantUserId;
-  const viewerCanManage = canManageCompany(db, viewer, company);
+  const viewerCanManage = canManageCompany(viewer, company);
 
   return {
     id: application.id,
@@ -584,7 +590,7 @@ function serializeApplication(db, application, viewer = null) {
   };
 }
 
-function serializeConversation(db, conversation, viewerUserId) {
+async function serializeConversation(conversation, viewerUserId) {
   const latestMessage =
     Array.isArray(conversation.messages) && conversation.messages.length
       ? conversation.messages[conversation.messages.length - 1]
@@ -592,6 +598,8 @@ function serializeConversation(db, conversation, viewerUserId) {
   const participantKey =
     Array.isArray(conversation.participantKeys) &&
     conversation.participantKeys.find((item) => item.userId === viewerUserId);
+
+  const members = await User.find({ id: { $in: conversation.memberUserIds || [] } });
 
   return {
     id: conversation.id,
@@ -604,12 +612,7 @@ function serializeConversation(db, conversation, viewerUserId) {
     messagesCount: Array.isArray(conversation.messages)
       ? conversation.messages.length
       : 0,
-    members: (Array.isArray(conversation.memberUserIds)
-      ? conversation.memberUserIds
-      : []
-    )
-      .map((userId) => directoryUserPreview(db.users.find((user) => user.id === userId)))
-      .filter(Boolean),
+    members: members.map((user) => directoryUserPreview(user)).filter(Boolean),
     participantKey: participantKey || null,
     latestMessage: latestMessage
       ? {
@@ -622,13 +625,12 @@ function serializeConversation(db, conversation, viewerUserId) {
   };
 }
 
-function serializeEncryptedMessage(db, message) {
+async function serializeEncryptedMessage(message) {
+  const sender = await User.findOne({ id: message.senderUserId });
   return {
     id: message.id,
     senderUserId: message.senderUserId,
-    sender: directoryUserPreview(
-      db.users.find((user) => user.id === message.senderUserId)
-    ),
+    sender: directoryUserPreview(sender),
     ciphertext: message.ciphertext,
     iv: message.iv,
     algorithm: message.algorithm,
@@ -636,12 +638,18 @@ function serializeEncryptedMessage(db, message) {
   };
 }
 
-function findConversationById(db, conversationId) {
-  return db.conversations.find((conversation) => conversation.id === conversationId) || null;
+async function findConversationById(conversationId) {
+  return await Conversation.findOne({ id: conversationId });
 }
 
-function getMessagingDirectory(db, user) {
+async function getMessagingDirectory(user) {
   const allowedUserIds = new Set();
+  const db = {
+    users: await User.find({}),
+    applications: await Application.find({}),
+    companies: await Company.find({}),
+    conversations: await Conversation.find({}),
+  };
 
   if (user.role === "admin") {
     db.users.forEach((candidate) => {
@@ -652,7 +660,7 @@ function getMessagingDirectory(db, user) {
   }
 
   if (user.role === "recruiter") {
-    const managedCompanyIds = new Set(getManagedCompanyIds(db, user));
+    const managedCompanyIds = new Set(await getManagedCompanyIds(user));
     db.applications.forEach((application) => {
       if (managedCompanyIds.has(application.companyId)) {
         allowedUserIds.add(application.applicantUserId);
@@ -718,118 +726,132 @@ function getMessagingDirectory(db, user) {
     });
 }
 
-function isRecruiterAuthorizedByApplication(db, recruiterUserId, ownerUserId) {
-  const recruiter = db.users.find((user) => user.id === recruiterUserId);
+async function isRecruiterAuthorizedByApplication(recruiterUserId, ownerUserId) {
+  const recruiter = await User.findOne({ id: recruiterUserId });
   if (!recruiter || recruiter.role !== "recruiter") {
     return false;
   }
 
-  const managedCompanyIds = new Set(getManagedCompanyIds(db, recruiter));
-  return db.applications.some(
-    (application) =>
-      application.applicantUserId === ownerUserId &&
-      managedCompanyIds.has(application.companyId)
-  );
+  const managedCompanyIds = new Set(await getManagedCompanyIds(recruiter));
+  return await Application.exists({
+    applicantUserId: ownerUserId,
+    companyId: { $in: Array.from(managedCompanyIds) },
+  });
 }
 
-function migrateUsersAndCollectionsIfNeeded() {
-  const db = readDb();
-  let changed = false;
+async function migrateUsersAndCollectionsIfNeeded() {
+  const users = await User.find({});
+  const companies = await Company.find({});
+  const jobs = await Job.find({});
+  const applications = await Application.find({});
+  const conversations = await Conversation.find({});
+
   const now = new Date().toISOString();
 
-  db.users.forEach((user) => {
+  for (const user of users) {
     let userChanged = false;
     const previousTotp = JSON.stringify(user.totp || {});
     const previousMessaging = JSON.stringify(user.messaging || {});
     if (JSON.stringify(ensureUserTotpState(user)) !== previousTotp) {
       userChanged = true;
-      changed = true;
     }
     if (JSON.stringify(ensureMessagingState(user)) !== previousMessaging) {
       userChanged = true;
-      changed = true;
     }
     if (user.otpSecrets || user.otpLastSentAt) {
-      delete user.otpSecrets;
-      delete user.otpLastSentAt;
+      user.set("otpSecrets", undefined);
+      user.set("otpLastSentAt", undefined);
       userChanged = true;
-      changed = true;
     }
     if (userChanged) {
       user.updatedAt = user.updatedAt || now;
+      user.markModified("totp");
+      user.markModified("messaging");
+      await user.save();
     }
-  });
+  }
 
-  db.companies.forEach((company) => {
+  for (const company of companies) {
+    let companyChanged = false;
     if (!Array.isArray(company.adminUserIds)) {
       company.adminUserIds = company.createdByUserId ? [company.createdByUserId] : [];
-      changed = true;
+      companyChanged = true;
     }
     company.adminUserIds = Array.from(new Set(company.adminUserIds.filter(Boolean)));
     if (!company.slug) {
-      company.slug = createUniqueCompanySlug(db, company.name || "company", company.id);
-      changed = true;
+      company.slug = await createUniqueCompanySlug(company.name || "company", company.id);
+      companyChanged = true;
     }
-  });
+    if (companyChanged) {
+      await company.save();
+    }
+  }
 
-  db.jobs.forEach((job) => {
+  for (const job of jobs) {
+    let jobChanged = false;
     if (!Array.isArray(job.requiredSkills)) {
       job.requiredSkills = [];
-      changed = true;
+      jobChanged = true;
     }
     if (!JOB_STATUSES.has(job.status)) {
       job.status = "open";
-      changed = true;
+      jobChanged = true;
     }
-  });
+    if (jobChanged) {
+      await job.save();
+    }
+  }
 
-  db.applications.forEach((application) => {
+  for (const application of applications) {
+    let appChanged = false;
     if (!APPLICATION_STATUSES.has(application.status)) {
       application.status = "Applied";
-      changed = true;
+      appChanged = true;
     }
     if (!Array.isArray(application.recruiterNotes)) {
       application.recruiterNotes = [];
-      changed = true;
+      appChanged = true;
     }
     if (!Array.isArray(application.statusHistory)) {
       application.statusHistory = [];
-      changed = true;
+      appChanged = true;
     }
-  });
+    if (appChanged) {
+      await application.save();
+    }
+  }
 
-  db.conversations.forEach((conversation) => {
+  for (const conversation of conversations) {
+    let convChanged = false;
     if (!Array.isArray(conversation.memberUserIds)) {
       conversation.memberUserIds = [];
-      changed = true;
+      convChanged = true;
     }
     if (!Array.isArray(conversation.participantKeys)) {
       conversation.participantKeys = [];
-      changed = true;
+      convChanged = true;
     }
     if (!Array.isArray(conversation.messages)) {
       conversation.messages = [];
-      changed = true;
+      convChanged = true;
     }
     if (!CONVERSATION_TYPES.has(conversation.type)) {
       conversation.type =
         conversation.memberUserIds.length > 2 ? "group" : "direct";
-      changed = true;
+      convChanged = true;
     }
-  });
-
-  if (changed) {
-    writeDb(db);
+    if (convChanged) {
+      await conversation.save();
+    }
   }
 }
 
-function deleteUserRecord(db, userId) {
-  const targetIndex = db.users.findIndex((user) => user.id === userId);
-  if (targetIndex < 0) {
+async function deleteUserRecord(userId) {
+  const target = await User.findOne({ id: userId });
+  if (!target) {
     return null;
   }
 
-  const target = db.users[targetIndex];
   if (target.resume?.storageName) {
     const storedPath = path.join(RESUME_DIR, target.resume.storageName);
     if (fs.existsSync(storedPath)) {
@@ -837,53 +859,44 @@ function deleteUserRecord(db, userId) {
     }
   }
 
-  db.users.splice(targetIndex, 1);
-  db.users.forEach((user) => {
-    if (Array.isArray(user.resume?.accessUserIds)) {
-      user.resume.accessUserIds = user.resume.accessUserIds.filter(
-        (accessUserId) => accessUserId !== userId
-      );
-    }
-  });
-  db.companies.forEach((company) => {
-    company.adminUserIds = Array.isArray(company.adminUserIds)
-      ? company.adminUserIds.filter((adminUserId) => adminUserId !== userId)
-      : [];
-    if (company.createdByUserId === userId) {
-      company.createdByUserId = null;
-    }
-  });
-  db.applications = db.applications.filter(
-    (application) => application.applicantUserId !== userId
+  await User.deleteOne({ id: userId });
+
+  await User.updateMany(
+    { "resume.accessUserIds": userId },
+    { $pull: { "resume.accessUserIds": userId } }
   );
-  db.conversations = db.conversations.reduce((nextConversations, conversation) => {
-    if (!Array.isArray(conversation.memberUserIds)) {
-      return nextConversations;
-    }
-    if (!conversation.memberUserIds.includes(userId)) {
-      nextConversations.push(conversation);
-      return nextConversations;
-    }
-    const nextMembers = conversation.memberUserIds.filter(
-      (memberUserId) => memberUserId !== userId
-    );
+
+  await Company.updateMany(
+    { adminUserIds: userId },
+    { $pull: { adminUserIds: userId } }
+  );
+  await Company.updateMany(
+    { createdByUserId: userId },
+    { $set: { createdByUserId: null } }
+  );
+
+  await Application.deleteMany({ applicantUserId: userId });
+
+  const convs = await Conversation.find({ memberUserIds: userId });
+  for (const conv of convs) {
+    const nextMembers = conv.memberUserIds.filter((id) => id !== userId);
     if (nextMembers.length < 2) {
-      return nextConversations;
+      await Conversation.deleteOne({ id: conv.id });
+    } else {
+      conv.memberUserIds = nextMembers;
+      conv.participantKeys = Array.isArray(conv.participantKeys)
+        ? conv.participantKeys.filter((item) => item.userId !== userId)
+        : [];
+      await conv.save();
     }
-    conversation.memberUserIds = nextMembers;
-    conversation.participantKeys = Array.isArray(conversation.participantKeys)
-      ? conversation.participantKeys.filter((item) => item.userId !== userId)
-      : [];
-    nextConversations.push(conversation);
-    return nextConversations;
-  }, []);
+  }
 
   return target;
 }
 
-function ensureDefaultAdminAccount() {
-  const db = readDb();
-  if (db.users.some((user) => user.role === "admin")) {
+async function ensureDefaultAdminAccount() {
+  const adminExists = await User.exists({ role: "admin" });
+  if (adminExists) {
     return;
   }
 
@@ -896,7 +909,7 @@ function ensureDefaultAdminAccount() {
   const adminPassword = process.env.DEFAULT_ADMIN_PASSWORD || "Admin@12345!";
   const timestamp = new Date().toISOString();
 
-  const adminUser = {
+  const adminUser = new User({
     id: uuidv4(),
     role: "admin",
     email: adminEmail,
@@ -918,16 +931,15 @@ function ensureDefaultAdminAccount() {
     createdAt: timestamp,
     updatedAt: timestamp,
     lastLoginAt: null,
-  };
+  });
 
-  db.users.push(adminUser);
-  appendAuditLog(db, {
+  await adminUser.save();
+  await appendAuditLog({
     actorUserId: adminUser.id,
     action: "ADMIN_BOOTSTRAP_CREATED",
     targetUserId: adminUser.id,
     metadata: { email: adminEmail },
   });
-  writeDb(db);
 }
 
 module.exports = {

@@ -1,4 +1,5 @@
 const { v4: uuidv4 } = require("uuid");
+const AuditLog = require("./models/AuditLog");
 const {
   sha256,
   isAuditPkiEnabled,
@@ -66,12 +67,15 @@ function getPreviousPointer(logs) {
   return previous.signature || previous.hash || GENESIS_POINTER;
 }
 
-function appendAuditLog(
-  db,
-  { actorUserId = null, action, targetUserId = null, metadata = {} }
-) {
+async function appendAuditLog({
+  actorUserId = null,
+  action,
+  targetUserId = null,
+  metadata = {},
+}) {
   const timestamp = new Date().toISOString();
-  const prevHash = getPreviousPointer(db.auditLogs);
+  const lastLogs = await AuditLog.find().sort({ createdAt: -1 }).limit(1);
+  const prevHash = getPreviousPointer(lastLogs);
   const record = {
     id: uuidv4(),
     timestamp,
@@ -86,13 +90,17 @@ function appendAuditLog(
     ? CHAIN_VERSION_PKI
     : CHAIN_VERSION_HMAC;
   record.payloadDigest = sha256(buildBasePayload(record));
-  record.signature = computeSignedChainSignature(record.prevHash, record.payloadDigest);
+  record.signature = computeSignedChainSignature(
+    record.prevHash,
+    record.payloadDigest
+  );
   record.hash = record.signature;
   record.blockchainVersion = BLOCKCHAIN_VERSION;
-  record.blockIndex = db.auditLogs.length;
-  record.previousBlockHash = db.auditLogs.length
-    ? db.auditLogs[db.auditLogs.length - 1].blockHash || GENESIS_POINTER
-    : GENESIS_POINTER;
+
+  const totalLogs = await AuditLog.countDocuments();
+  record.blockIndex = totalLogs;
+  record.previousBlockHash =
+    lastLogs.length > 0 ? lastLogs[0].blockHash || GENESIS_POINTER : GENESIS_POINTER;
   record.blockDifficulty = AUDIT_BLOCKCHAIN_DIFFICULTY;
   const mined = mineBlockHash(
     record,
@@ -102,8 +110,9 @@ function appendAuditLog(
   record.blockNonce = mined.nonce;
   record.blockHash = mined.blockHash;
 
-  db.auditLogs.push(record);
-  return record;
+  const newLog = new AuditLog(record);
+  await newLog.save();
+  return newLog;
 }
 
 function verifyAuditChain(logs) {
