@@ -29,33 +29,6 @@ function buildQuery(filters) {
   return query ? `?${query}` : "";
 }
 
-function MatchInfo({ matchData }) {
-  if (!matchData) return null;
-
-  const { score, matchedKeywords } = matchData;
-  let colorClass = "match-low";
-  if (score >= 80) colorClass = "match-high";
-  else if (score >= 50) colorClass = "match-medium";
-
-  return (
-    <div className="match-info">
-      <div className={`match-score-badge ${colorClass}`}>
-        <span className="match-icon">✨</span>
-        <span>{score}% Match</span>
-      </div>
-      {matchedKeywords && matchedKeywords.length > 0 && (
-        <div className="matched-keywords">
-          {matchedKeywords.map((kw) => (
-            <span key={kw} className="keyword-chip">
-              {kw}
-            </span>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function OpportunityHub({ request, currentUser, onStatus, onError, clearFeedback }) {
   const [filters, setFilters] = useState(defaultFilters);
   const [jobs, setJobs] = useState([]);
@@ -249,8 +222,6 @@ function OpportunityHub({ request, currentUser, onStatus, onError, clearFeedback
                       {job.workplaceType}
                     </span>
                   </div>
-
-                  <MatchInfo matchData={job.matchData} />
 
                   <p className="muted-copy">
                     {job.location} • {job.employmentType} • Deadline {formatDate(job.applicationDeadline)}

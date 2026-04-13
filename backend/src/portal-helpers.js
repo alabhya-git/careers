@@ -5,7 +5,6 @@ const { RESUME_DIR, OTP_STEP_SECONDS, TOTP_ISSUER } = require("./config");
 const { appendAuditLog } = require("./audit");
 const { readDb, writeDb } = require("./store");
 const { hashPassword, verifyTotp, verifyAuthToken } = require("./security");
-const { calculateMatchScore } = require("./matcher");
 
 const PROFILE_PRIVACY_OPTIONS = new Set(["public", "connections", "private"]);
 const ALLOWED_SELF_ROLES = new Set(["user", "recruiter"]);
@@ -527,9 +526,6 @@ function serializeJob(db, job, viewer = null) {
       : null,
     applicantCount: canManage ? applicantCount : undefined,
     canManage,
-    matchData: viewer?.role === "user" && viewer.resume?.parsedText 
-      ? calculateMatchScore(viewer.resume.parsedText, job)
-      : null,
   };
 }
 
@@ -585,8 +581,6 @@ function serializeApplication(db, application, viewer = null) {
           status: job.status,
         }
       : null,
-    matchScore: application.matchScore || 0,
-    matchedKeywords: Array.isArray(application.matchedKeywords) ? application.matchedKeywords : [],
   };
 }
 

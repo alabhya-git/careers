@@ -62,32 +62,6 @@ function buildJobForm(job) {
   };
 }
 
-function MatchInfo({ score, matchedKeywords }) {
-  if (score === undefined) return null;
-
-  let colorClass = "match-low";
-  if (score >= 80) colorClass = "match-high";
-  else if (score >= 50) colorClass = "match-medium";
-
-  return (
-    <div className="match-info">
-      <div className={`match-score-badge ${colorClass}`}>
-        <span className="match-icon">✨</span>
-        <span>{score}% Candidate Match</span>
-      </div>
-      {matchedKeywords && matchedKeywords.length > 0 && (
-        <div className="matched-keywords">
-          {matchedKeywords.map((kw) => (
-            <span key={kw} className="keyword-chip">
-              {kw}
-            </span>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function HiringHub({ request, onStatus, onError, clearFeedback }) {
   const [companies, setCompanies] = useState([]);
   const [applications, setApplications] = useState([]);
@@ -588,8 +562,6 @@ function HiringHub({ request, onStatus, onError, clearFeedback }) {
                         {application.status}
                       </span>
                     </div>
-
-                    <MatchInfo score={application.matchScore} matchedKeywords={application.matchedKeywords} />
 
                     <p>{application.coverNote || "No cover note shared."}</p>
                     <p className="muted-copy">

@@ -1,6 +1,4 @@
 const { v4: uuidv4 } = require("uuid");
-const { calculateMatchScore } = require("../matcher");
-const { verifyAuthToken } = require("../security");
 const { appendAuditLog } = require("../audit");
 const { readDb, writeDb } = require("../store");
 const {
@@ -228,17 +226,6 @@ function registerOpportunityRoutes(app) {
 
   app.get("/api/jobs", (req, res) => {
     const db = readDb();
-    
-    // Optional auth for match data
-    let viewer = null;
-    const authHeader = req.headers.authorization || "";
-    if (authHeader.startsWith("Bearer ")) {
-      try {
-        const payload = verifyAuthToken(authHeader.slice(7));
-        viewer = db.users.find((u) => u.id === payload.sub);
-      } catch (e) {}
-    }
-
     const query = sanitizeText(req.query.q || "", 120).toLowerCase();
     const companyFilter = sanitizeText(req.query.company || "", 120).toLowerCase();
     const locationFilter = sanitizeText(req.query.location || "", 120).toLowerCase();
@@ -275,28 +262,9 @@ function registerOpportunityRoutes(app) {
         const leftDate = new Date(left.updatedAt || left.createdAt || 0).getTime();
         return rightDate - leftDate;
       })
-      .map((job) => serializeJob(db, job, viewer));
+      .map((job) => serializeJob(db, job));
 
     res.json({ jobs });
-  });
-
-  app.get("/api/jobs/:jobId/match-preview", requireAuth, (req, res) => {
-    const db = readDb();
-    const user = db.users.find((item) => item.id === req.auth.userId);
-    const job = getJobById(db, sanitizeText(req.params.jobId, 80));
-    
-    if (!job) {
-      res.status(404).json({ message: "Job not found." });
-      return;
-    }
-
-    if (!user.resume?.parsedText) {
-      res.status(400).json({ message: "Upload a resume to see matching score." });
-      return;
-    }
-
-    const match = calculateMatchScore(user.resume.parsedText, job);
-    res.json(match);
   });
 
   app.post("/api/companies/:companyId/jobs", requireAuth, requireRole(["recruiter", "admin"]), (req, res) => {
@@ -478,16 +446,12 @@ function registerOpportunityRoutes(app) {
     }
 
     const timestamp = new Date().toISOString();
-    const match = calculateMatchScore(applicant.resume.parsedText || "", job);
-    
     const application = {
       id: uuidv4(),
       jobId: job.id,
       companyId: company.id,
       applicantUserId: applicant.id,
       coverNote,
-      matchScore: match.score,
-      matchedKeywords: match.matchedKeywords,
       status: "Applied",
       isShortlisted: false,
       recruiterNotes: [],
