@@ -181,6 +181,7 @@ function registerAuthProfileRoutes(app) {
         totpState.pendingSecret = generateOtpSecret();
         totpState.pendingIssuedAt = new Date().toISOString();
         user.updatedAt = totpState.pendingIssuedAt;
+        user.markModified("totp");
         await appendAuditLog({
           actorUserId: user.id,
           action: "TOTP_SETUP_INITIATED",
@@ -227,6 +228,7 @@ function registerAuthProfileRoutes(app) {
         targetUserId: user.id,
         metadata: { method: "totp_setup" },
       });
+      user.markModified("totp");
       await user.save();
 
       res.json({
@@ -254,12 +256,9 @@ function registerAuthProfileRoutes(app) {
     totpState.lastVerifiedAt = now;
     user.lastLoginAt = now;
     user.updatedAt = now;
-    await appendAuditLog({
-      actorUserId: user.id,
-      action: "USER_LOGIN_SUCCESS",
-      targetUserId: user.id,
       metadata: { method: "totp" },
     });
+    user.markModified("totp");
     await user.save();
 
     res.json({
@@ -346,12 +345,9 @@ function registerAuthProfileRoutes(app) {
     user.passwordHash = hashPassword(newPassword);
     user.updatedAt = new Date().toISOString();
     ensureUserTotpState(user).lastVerifiedAt = user.updatedAt;
-    await appendAuditLog({
-      actorUserId: user.id,
-      action: "PASSWORD_RESET_COMPLETED",
-      targetUserId: user.id,
       metadata: { method: "totp" },
     });
+    user.markModified("totp");
     await user.save();
 
     res.json({ message: "Password reset successful. Please login again." });
@@ -475,6 +471,7 @@ function registerAuthProfileRoutes(app) {
         sizeBytes: req.file.size,
       },
     });
+    user.markModified("resume");
     await user.save();
 
     res.status(201).json({
@@ -615,6 +612,7 @@ function registerAuthProfileRoutes(app) {
       targetUserId: owner.id,
       metadata: { method: "totp" },
     });
+    requester.markModified("totp");
     await requester.save();
 
     const safeFilename = String(owner.resume.originalName || "resume.bin").replace(
