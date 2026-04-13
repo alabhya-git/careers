@@ -4,7 +4,7 @@ import "./App.css";
 import OpportunityHub from "./components/OpportunityHub";
 import HiringHub from "./components/HiringHub";
 import MessagingHub from "./components/MessagingHub";
-
+import VirtualKeyboard from "./components/VirtualKeyboard";
 const API_BASE = process.env.REACT_APP_API_BASE_URL || "http://localhost:5000";
 const LOCAL_TOKEN_KEY = "job_portal_token";
 
@@ -1027,17 +1027,17 @@ function App() {
                 <form onSubmit={handleForgotConfirm}>
                   <label>
                     Authenticator code
-                    <input
-                      value={forgotForm.totp}
-                      onChange={(event) =>
+                    <VirtualKeyboard
+                      onChange={(val) =>
                         setForgotForm((previous) => ({
                           ...previous,
-                          totp: event.target.value,
+                          totp: val,
                         }))
                       }
-                      inputMode="numeric"
-                      pattern="[0-9]{6}"
-                      placeholder="123456"
+                    /> 
+                    <input
+                      type="hidden"
+                      value={forgotForm.totp}
                       required
                     />
                   </label>
@@ -1333,12 +1333,11 @@ function App() {
               <div className="download-tools">
                 <label>
                   Authenticator code
+                  <VirtualKeyboard onChange={(val) => setDownloadTotp(val)} />
                   <input
+                    type="hidden"
                     value={downloadTotp}
-                    onChange={(event) => setDownloadTotp(event.target.value)}
-                    inputMode="numeric"
-                    pattern="[0-9]{6}"
-                    placeholder="123456"
+                    required
                   />
                 </label>
 
@@ -1365,17 +1364,17 @@ function App() {
                   <form onSubmit={handleSecurityPasswordResetConfirm}>
                     <label>
                       Authenticator code
-                      <input
-                        value={securityReset.totp}
-                        onChange={(event) =>
+                      <VirtualKeyboard
+                        onChange={(value) =>
                           setSecurityReset((previous) => ({
                             ...previous,
-                            totp: event.target.value,
+                            totp: value,
                           }))
                         }
-                        inputMode="numeric"
-                        pattern="[0-9]{6}"
-                        placeholder="123456"
+                      />
+                      <input
+                        type="hidden"
+                        value={securityReset.totp}
                         required
                       />
                     </label>
@@ -1425,17 +1424,17 @@ function App() {
                   <form onSubmit={handleAccountDeletion}>
                     <label>
                       Authenticator code
-                      <input
-                        value={securityDelete.totp}
-                        onChange={(event) =>
+                      <VirtualKeyboard
+                        onChange={(value) =>
                           setSecurityDelete((previous) => ({
                             ...previous,
-                            totp: event.target.value,
+                            totp: value,
                           }))
                         }
-                        inputMode="numeric"
-                        pattern="[0-9]{6}"
-                        placeholder="123456"
+                      />
+                      <input
+                        type="hidden"
+                        value={securityDelete.totp}
                         required
                       />
                     </label>
