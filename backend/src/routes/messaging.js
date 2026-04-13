@@ -58,11 +58,15 @@ function registerMessagingRoutes(app) {
       return;
     }
 
-    user.messaging.publicKey = publicKey;
-    user.messaging.encryptedPrivateKey = encryptedPrivateKey;
-    user.messaging.algorithm = algorithm || "RSA-OAEP";
-    user.messaging.updatedAt = new Date().toISOString();
-    user.updatedAt = user.messaging.updatedAt;
+    const updatedAt = new Date().toISOString();
+    user.messaging = {
+      ...user.messaging,
+      publicKey,
+      encryptedPrivateKey,
+      algorithm: algorithm || "RSA-OAEP",
+      updatedAt,
+    };
+    user.updatedAt = updatedAt;
     user.markModified("messaging");
     await appendAuditLog({
       actorUserId: user.id,

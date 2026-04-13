@@ -178,9 +178,14 @@ function registerAuthProfileRoutes(app) {
     const totpState = ensureUserTotpState(user);
     if (!totpState.isEnabled || !totpState.secret) {
       if (!totpState.pendingSecret) {
-        totpState.pendingSecret = generateOtpSecret();
-        totpState.pendingIssuedAt = new Date().toISOString();
-        user.updatedAt = totpState.pendingIssuedAt;
+        const pendingSecret = generateOtpSecret();
+        const pendingIssuedAt = new Date().toISOString();
+        user.totp = {
+          ...totpState,
+          pendingSecret,
+          pendingIssuedAt,
+        };
+        user.updatedAt = pendingIssuedAt;
         user.markModified("totp");
         await appendAuditLog({
           actorUserId: user.id,
@@ -209,11 +214,14 @@ function registerAuthProfileRoutes(app) {
       }
 
       const now = new Date().toISOString();
-      totpState.secret = totpState.pendingSecret;
-      totpState.pendingSecret = "";
-      totpState.pendingIssuedAt = null;
-      totpState.isEnabled = true;
-      totpState.lastVerifiedAt = now;
+      user.totp = {
+        ...totpState,
+        secret: totpState.pendingSecret,
+        pendingSecret: "",
+        pendingIssuedAt: null,
+        isEnabled: true,
+        lastVerifiedAt: now,
+      };
       user.lastLoginAt = now;
       user.updatedAt = now;
       await appendAuditLog({
@@ -253,7 +261,10 @@ function registerAuthProfileRoutes(app) {
     }
 
     const now = new Date().toISOString();
-    totpState.lastVerifiedAt = now;
+    user.totp = {
+      ...totpState,
+      lastVerifiedAt: now,
+    };
     user.lastLoginAt = now;
     user.updatedAt = now;
       metadata: { method: "totp" },
@@ -344,7 +355,11 @@ function registerAuthProfileRoutes(app) {
 
     user.passwordHash = hashPassword(newPassword);
     user.updatedAt = new Date().toISOString();
-    ensureUserTotpState(user).lastVerifiedAt = user.updatedAt;
+    const totpState = ensureUserTotpState(user);
+    user.totp = {
+      ...totpState,
+      lastVerifiedAt: user.updatedAt,
+    };
       metadata: { method: "totp" },
     });
     user.markModified("totp");
