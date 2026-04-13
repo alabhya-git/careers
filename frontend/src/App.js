@@ -5,7 +5,7 @@ import OpportunityHub from "./components/OpportunityHub";
 import HiringHub from "./components/HiringHub";
 import MessagingHub from "./components/MessagingHub";
 import VirtualKeyboard from "./components/VirtualKeyboard";
-const API_BASE = process.env.REACT_APP_API_BASE_URL || "http://localhost:3000";
+const API_BASE = process.env.REACT_APP_API_BASE_URL || "http://localhost:5000";
 const LOCAL_TOKEN_KEY = "job_portal_token";
 
 const PROFILE_PRIVACY_KEYS = [

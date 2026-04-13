@@ -6,8 +6,7 @@ const helmet = require("helmet");
 const hpp = require("hpp");
 const rateLimit = require("express-rate-limit");
 const multer = require("multer");
-const mongoose = require("mongoose");
-const { PORT, CORS_ORIGIN, MONGO_URL } = require("./src/config");
+const { PORT, CORS_ORIGIN } = require("./src/config");
 const { ensureDirectories } = require("./src/store");
 const {
   ensureDefaultAdminAccount,
@@ -91,17 +90,9 @@ app.use((_, res) => {
 });
 
 ensureDirectories();
+ensureDefaultAdminAccount();
+migrateUsersAndCollectionsIfNeeded();
 
-mongoose
-  .connect(MONGO_URL)
-  .then(async () => {
-    console.log("Connected to MongoDB");
-    await ensureDefaultAdminAccount();
-    await migrateUsersAndCollectionsIfNeeded();
-    app.listen(PORT, "0.0.0.0", () => {
-      console.log(`Backend running on port ${PORT}`);
-    });
-  })
-  .catch((err) => {
-    console.error("MongoDB connection error:", err);
-  });
+app.listen(PORT, () => {
+  console.log(`Backend running on port ${PORT}`);
+});

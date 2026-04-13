@@ -1,9 +1,6 @@
 const { v4: uuidv4 } = require("uuid");
 const { appendAuditLog } = require("../audit");
-const User = require("../models/User");
-const Company = require("../models/Company");
-const Job = require("../models/Job");
-const Application = require("../models/Application");
+const { readDb, writeDb } = require("../store");
 const {
   JOB_WORKPLACE_TYPES,
   JOB_EMPLOYMENT_TYPES,
@@ -32,59 +29,71 @@ const {
 } = require("../portal-helpers");
 
 function registerOpportunityRoutes(app) {
-  app.get("/api/companies", async (req, res) => {
-    const queryTerm = sanitizeText(req.query.q || "", 120).toLowerCase();
+  app.get("/api/companies", (req, res) => {
+    const db = readDb();
+    const query = sanitizeText(req.query.q || "", 120).toLowerCase();
 
-    let companies;
-    if (queryTerm) {
-      companies = await Company.find({
-        $or: [
-          { name: { $regex: queryTerm, $options: "i" } },
-          { description: { $regex: queryTerm, $options: "i" } },
-          { location: { $regex: queryTerm, $options: "i" } },
-        ],
-      }).sort({ updatedAt: -1, createdAt: -1 });
-    } else {
-      companies = await Company.find({}).sort({ updatedAt: -1, createdAt: -1 });
-    }
+    const companies = db.companies
+      .filter((company) => {
+        if (!query) {
+          return true;
+        }
 
-    const serializedCompanies = await Promise.all(
-      companies.map((company) => serializeCompany(company))
-    );
+        const haystack = [
+          company.name,
+          company.description,
+          company.location,
+          company.website,
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
 
-    res.json({ companies: serializedCompanies });
-  });
-
-  app.get("/api/companies/mine", requireAuth, requireRole(["recruiter", "admin"]), async (req, res) => {
-    const actor = await User.findOne({ id: req.auth.userId });
-    const managedCompanyIds = await getManagedCompanyIds(actor);
-    
-    const companies = await Company.find({ id: { $in: managedCompanyIds } }).sort({ updatedAt: -1, createdAt: -1 });
-    
-    const serializedCompanies = await Promise.all(
-      companies.map(async (company) => {
-        const jobs = await Job.find({ companyId: company.id }).sort({ updatedAt: -1, createdAt: -1 });
-        const serializedJobs = await Promise.all(
-          jobs.map((job) => serializeJob(job, actor))
-        );
-        return {
-          ...(await serializeCompany(company, actor)),
-          jobs: serializedJobs,
-        };
+        return haystack.includes(query);
       })
-    );
+      .sort((left, right) => {
+        const rightDate = new Date(right.updatedAt || right.createdAt || 0).getTime();
+        const leftDate = new Date(left.updatedAt || left.createdAt || 0).getTime();
+        return rightDate - leftDate;
+      })
+      .map((company) => serializeCompany(db, company));
 
-    res.json({ companies: serializedCompanies });
+    res.json({ companies });
   });
 
-  app.post("/api/companies", requireAuth, requireRole(["recruiter", "admin"]), async (req, res) => {
+  app.get("/api/companies/mine", requireAuth, requireRole(["recruiter", "admin"]), (req, res) => {
+    const db = readDb();
+    const actor = db.users.find((item) => item.id === req.auth.userId);
+    const managedCompanyIds = new Set(getManagedCompanyIds(db, actor));
+    const companies = db.companies
+      .filter((company) => managedCompanyIds.has(company.id))
+      .sort((left, right) => {
+        const rightDate = new Date(right.updatedAt || right.createdAt || 0).getTime();
+        const leftDate = new Date(left.updatedAt || left.createdAt || 0).getTime();
+        return rightDate - leftDate;
+      })
+      .map((company) => ({
+        ...serializeCompany(db, company, actor),
+        jobs: db.jobs
+          .filter((job) => job.companyId === company.id)
+          .sort((left, right) => {
+            const rightDate = new Date(right.updatedAt || right.createdAt || 0).getTime();
+            const leftDate = new Date(left.updatedAt || left.createdAt || 0).getTime();
+            return rightDate - leftDate;
+          })
+          .map((job) => serializeJob(db, job, actor)),
+      }));
+
+    res.json({ companies });
+  });
+
+  app.post("/api/companies", requireAuth, requireRole(["recruiter", "admin"]), (req, res) => {
     const name = sanitizeText(req.body.name, 120);
     const description = sanitizeMultilineText(req.body.description, 1200);
     const location = sanitizeText(req.body.location, 120);
     const website = sanitizeUrl(req.body.website);
-    const adminUserIdsInput = parseIdList(req.body.adminUserIds);
     const adminUserIds = Array.from(
-      new Set([req.auth.userId, ...adminUserIdsInput])
+      new Set([req.auth.userId, ...parseIdList(req.body.adminUserIds)])
     );
 
     if (!name || !description || !location || !website) {
@@ -94,20 +103,22 @@ function registerOpportunityRoutes(app) {
       return;
     }
 
-    for (const userId of adminUserIds) {
-      const candidate = await User.findOne({ id: userId });
-      if (!candidate || !["recruiter", "admin"].includes(candidate.role)) {
-        res.status(400).json({
-          message: `User ${userId} cannot be a company admin. All company admins must be recruiter or admin accounts.`,
-        });
-        return;
-      }
+    const db = readDb();
+    const invalidAdmin = adminUserIds.find((userId) => {
+      const candidate = db.users.find((user) => user.id === userId);
+      return !candidate || !["recruiter", "admin"].includes(candidate.role);
+    });
+    if (invalidAdmin) {
+      res.status(400).json({
+        message: "All company admins must be recruiter or admin accounts.",
+      });
+      return;
     }
 
     const timestamp = new Date().toISOString();
-    const company = new Company({
+    const company = {
       id: uuidv4(),
-      slug: await createUniqueCompanySlug(name),
+      slug: createUniqueCompanySlug(db, name),
       name,
       description,
       location,
@@ -116,38 +127,39 @@ function registerOpportunityRoutes(app) {
       adminUserIds,
       createdAt: timestamp,
       updatedAt: timestamp,
-    });
+    };
 
-    await company.save();
-    await appendAuditLog({
+    db.companies.push(company);
+    appendAuditLog(db, {
       actorUserId: req.auth.userId,
       action: "COMPANY_CREATED",
       targetUserId: req.auth.userId,
       metadata: { companyId: company.id, companyName: company.name },
     });
+    writeDb(db);
 
-    const actor = await User.findOne({ id: req.auth.userId });
     res.status(201).json({
       message: "Company page created.",
-      company: await serializeCompany(company, actor),
+      company: serializeCompany(db, company, db.users.find((user) => user.id === req.auth.userId)),
     });
   });
 
-  app.patch("/api/companies/:companyId", requireAuth, requireRole(["recruiter", "admin"]), async (req, res) => {
-    const actor = await User.findOne({ id: req.auth.userId });
-    const company = await getCompanyById(sanitizeText(req.params.companyId, 80));
+  app.patch("/api/companies/:companyId", requireAuth, requireRole(["recruiter", "admin"]), (req, res) => {
+    const db = readDb();
+    const actor = db.users.find((item) => item.id === req.auth.userId);
+    const company = getCompanyById(db, sanitizeText(req.params.companyId, 80));
     if (!company) {
       res.status(404).json({ message: "Company not found." });
       return;
     }
-    if (!canManageCompany(actor, company)) {
+    if (!canManageCompany(db, actor, company)) {
       res.status(403).json({ message: "You cannot manage this company." });
       return;
     }
 
     if (typeof req.body.name === "string") {
       company.name = sanitizeText(req.body.name, 120);
-      company.slug = await createUniqueCompanySlug(company.name, company.id);
+      company.slug = createUniqueCompanySlug(db, company.name, company.id);
     }
     if (typeof req.body.description === "string") company.description = sanitizeMultilineText(req.body.description, 1200);
     if (typeof req.body.location === "string") company.location = sanitizeText(req.body.location, 120);
@@ -163,114 +175,107 @@ function registerOpportunityRoutes(app) {
       const nextAdminUserIds = Array.from(
         new Set([company.createdByUserId, ...parseIdList(req.body.adminUserIds)].filter(Boolean))
       );
-      for (const userId of nextAdminUserIds) {
-        const candidate = await User.findOne({ id: userId });
-        if (!candidate || !["recruiter", "admin"].includes(candidate.role)) {
-          res.status(400).json({
-            message: `User ${userId} cannot be a company admin. All company admins must be recruiter or admin accounts.`,
-          });
-          return;
-        }
+      const invalidAdmin = nextAdminUserIds.find((userId) => {
+        const candidate = db.users.find((user) => user.id === userId);
+        return !candidate || !["recruiter", "admin"].includes(candidate.role);
+      });
+      if (invalidAdmin) {
+        res.status(400).json({
+          message: "All company admins must be recruiter or admin accounts.",
+        });
+        return;
       }
       company.adminUserIds = nextAdminUserIds;
     }
 
     company.updatedAt = new Date().toISOString();
-    await appendAuditLog({
+    appendAuditLog(db, {
       actorUserId: actor.id,
       action: "COMPANY_UPDATED",
       targetUserId: actor.id,
       metadata: { companyId: company.id, fields: Object.keys(req.body || {}) },
     });
-    await company.save();
+    writeDb(db);
 
     res.json({
       message: "Company updated.",
-      company: await serializeCompany(company, actor),
+      company: serializeCompany(db, company, actor),
     });
   });
 
-  app.get("/api/companies/:companyId", async (req, res) => {
-    const company = await getCompanyById(sanitizeText(req.params.companyId, 80));
+  app.get("/api/companies/:companyId", (req, res) => {
+    const db = readDb();
+    const company = getCompanyById(db, sanitizeText(req.params.companyId, 80));
     if (!company) {
       res.status(404).json({ message: "Company not found." });
       return;
     }
 
-    const jobs = await Job.find({
-      companyId: company.id,
-      status: "open",
-    });
-    
-    const validJobs = jobs.filter(job => !isDeadlinePassed(job.applicationDeadline));
-    const serializedJobs = await Promise.all(
-      validJobs.map((job) => serializeJob(job))
-    );
-
     res.json({
-      company: await serializeCompany(company),
-      jobs: serializedJobs,
+      company: serializeCompany(db, company),
+      jobs: db.jobs
+        .filter(
+          (job) =>
+            job.companyId === company.id &&
+            job.status === "open" &&
+            !isDeadlinePassed(job.applicationDeadline)
+        )
+        .map((job) => serializeJob(db, job)),
     });
   });
 
-  app.get("/api/jobs", async (req, res) => {
-    const queryTerm = sanitizeText(req.query.q || "", 120).toLowerCase();
+  app.get("/api/jobs", (req, res) => {
+    const db = readDb();
+    const query = sanitizeText(req.query.q || "", 120).toLowerCase();
     const companyFilter = sanitizeText(req.query.company || "", 120).toLowerCase();
     const locationFilter = sanitizeText(req.query.location || "", 120).toLowerCase();
     const skillFilter = sanitizeText(req.query.skill || "", 40).toLowerCase();
     const workplaceType = sanitizeText(req.query.workplaceType || "", 40).toLowerCase();
     const employmentType = sanitizeText(req.query.employmentType || "", 40).toLowerCase();
 
-    let query = {
-      status: "open",
-    };
+    const jobs = db.jobs
+      .filter((job) => job.status === "open" && !isDeadlinePassed(job.applicationDeadline))
+      .filter((job) => {
+        const company = getCompanyById(db, job.companyId);
+        const haystack = [
+          job.title,
+          job.description,
+          job.location,
+          ...(Array.isArray(job.requiredSkills) ? job.requiredSkills : []),
+          company?.name || "",
+        ]
+          .join(" ")
+          .toLowerCase();
+        if (query && !haystack.includes(query)) return false;
+        if (companyFilter && !(company?.name || "").toLowerCase().includes(companyFilter)) return false;
+        if (locationFilter && !job.location.toLowerCase().includes(locationFilter)) return false;
+        if (
+          skillFilter &&
+          !job.requiredSkills.some((skill) => skill.toLowerCase().includes(skillFilter))
+        ) return false;
+        if (workplaceType && job.workplaceType !== workplaceType) return false;
+        if (employmentType && job.employmentType !== employmentType) return false;
+        return true;
+      })
+      .sort((left, right) => {
+        const rightDate = new Date(right.updatedAt || right.createdAt || 0).getTime();
+        const leftDate = new Date(left.updatedAt || left.createdAt || 0).getTime();
+        return rightDate - leftDate;
+      })
+      .map((job) => serializeJob(db, job));
 
-    if (workplaceType) query.workplaceType = workplaceType;
-    if (employmentType) query.employmentType = employmentType;
-
-    const allJobs = await Job.find(query).sort({ updatedAt: -1, createdAt: -1 });
-    
-    const filteredJobs = [];
-    for (const job of allJobs) {
-      if (isDeadlinePassed(job.applicationDeadline)) continue;
-      
-      const company = await getCompanyById(job.companyId);
-      const haystack = [
-        job.title,
-        job.description,
-        job.location,
-        ...(Array.isArray(job.requiredSkills) ? job.requiredSkills : []),
-        company?.name || "",
-      ]
-        .join(" ")
-        .toLowerCase();
-
-      if (queryTerm && !haystack.includes(queryTerm)) continue;
-      if (companyFilter && !(company?.name || "").toLowerCase().includes(companyFilter)) continue;
-      if (locationFilter && !job.location.toLowerCase().includes(locationFilter)) continue;
-      if (
-        skillFilter &&
-        !job.requiredSkills.some((skill) => skill.toLowerCase().includes(skillFilter))
-      ) continue;
-      
-      filteredJobs.push(job);
-    }
-
-    const serializedJobs = await Promise.all(
-      filteredJobs.map((job) => serializeJob(job))
-    );
-
-    res.json({ jobs: serializedJobs });
+    res.json({ jobs });
   });
 
-  app.post("/api/companies/:companyId/jobs", requireAuth, requireRole(["recruiter", "admin"]), async (req, res) => {
-    const actor = await User.findOne({ id: req.auth.userId });
-    const company = await getCompanyById(sanitizeText(req.params.companyId, 80));
+  app.post("/api/companies/:companyId/jobs", requireAuth, requireRole(["recruiter", "admin"]), (req, res) => {
+    const db = readDb();
+    const actor = db.users.find((item) => item.id === req.auth.userId);
+    const company = getCompanyById(db, sanitizeText(req.params.companyId, 80));
     if (!company) {
       res.status(404).json({ message: "Company not found." });
       return;
     }
-    if (!canManageCompany(actor, company)) {
+    if (!canManageCompany(db, actor, company)) {
       res.status(403).json({ message: "You cannot manage this company." });
       return;
     }
@@ -305,7 +310,7 @@ function registerOpportunityRoutes(app) {
     }
 
     const timestamp = new Date().toISOString();
-    const job = new Job({
+    const job = {
       id: uuidv4(),
       companyId: company.id,
       title,
@@ -321,33 +326,34 @@ function registerOpportunityRoutes(app) {
       createdByUserId: actor.id,
       createdAt: timestamp,
       updatedAt: timestamp,
-    });
+    };
 
-    await job.save();
+    db.jobs.push(job);
     company.updatedAt = timestamp;
-    await company.save();
-    await appendAuditLog({
+    appendAuditLog(db, {
       actorUserId: actor.id,
       action: "JOB_CREATED",
       targetUserId: actor.id,
       metadata: { companyId: company.id, jobId: job.id, title: job.title },
     });
+    writeDb(db);
 
     res.status(201).json({
       message: "Job posted successfully.",
-      job: await serializeJob(job, actor),
+      job: serializeJob(db, job, actor),
     });
   });
 
-  app.patch("/api/jobs/:jobId", requireAuth, requireRole(["recruiter", "admin"]), async (req, res) => {
-    const actor = await User.findOne({ id: req.auth.userId });
-    const job = await getJobById(sanitizeText(req.params.jobId, 80));
-    const company = job ? await getCompanyById(job.companyId) : null;
+  app.patch("/api/jobs/:jobId", requireAuth, requireRole(["recruiter", "admin"]), (req, res) => {
+    const db = readDb();
+    const actor = db.users.find((item) => item.id === req.auth.userId);
+    const job = getJobById(db, sanitizeText(req.params.jobId, 80));
+    const company = job ? getCompanyById(db, job.companyId) : null;
     if (!job || !company) {
       res.status(404).json({ message: "Job not found." });
       return;
     }
-    if (!canManageCompany(actor, company)) {
+    if (!canManageCompany(db, actor, company)) {
       res.status(403).json({ message: "You cannot manage this job." });
       return;
     }
@@ -397,22 +403,22 @@ function registerOpportunityRoutes(app) {
 
     job.updatedAt = new Date().toISOString();
     company.updatedAt = job.updatedAt;
-    await appendAuditLog({
+    appendAuditLog(db, {
       actorUserId: actor.id,
       action: "JOB_UPDATED",
       targetUserId: actor.id,
       metadata: { jobId: job.id, fields: Object.keys(req.body || {}) },
     });
-    await job.save();
-    await company.save();
+    writeDb(db);
 
-    res.json({ message: "Job updated.", job: await serializeJob(job, actor) });
+    res.json({ message: "Job updated.", job: serializeJob(db, job, actor) });
   });
 
-  app.post("/api/jobs/:jobId/apply", requireAuth, requireRole(["user"]), async (req, res) => {
-    const applicant = await User.findOne({ id: req.auth.userId });
-    const job = await getJobById(sanitizeText(req.params.jobId, 80));
-    const company = job ? await getCompanyById(job.companyId) : null;
+  app.post("/api/jobs/:jobId/apply", requireAuth, requireRole(["user"]), (req, res) => {
+    const db = readDb();
+    const applicant = db.users.find((item) => item.id === req.auth.userId);
+    const job = getJobById(db, sanitizeText(req.params.jobId, 80));
+    const company = job ? getCompanyById(db, job.companyId) : null;
     const coverNote = sanitizeMultilineText(req.body.coverNote, 1200);
 
     if (!applicant || !job || !company) {
@@ -429,17 +435,18 @@ function registerOpportunityRoutes(app) {
       });
       return;
     }
-    const alreadyApplied = await Application.exists({
-      jobId: job.id,
-      applicantUserId: applicant.id,
-    });
-    if (alreadyApplied) {
+    if (
+      db.applications.some(
+        (application) =>
+          application.jobId === job.id && application.applicantUserId === applicant.id
+      )
+    ) {
       res.status(409).json({ message: "You have already applied to this job." });
       return;
     }
 
     const timestamp = new Date().toISOString();
-    const application = new Application({
+    const application = {
       id: uuidv4(),
       jobId: job.id,
       companyId: company.id,
@@ -459,81 +466,93 @@ function registerOpportunityRoutes(app) {
       ],
       createdAt: timestamp,
       updatedAt: timestamp,
-    });
+    };
 
-    await application.save();
-    await appendAuditLog({
+    db.applications.push(application);
+    appendAuditLog(db, {
       actorUserId: applicant.id,
       action: "JOB_APPLICATION_CREATED",
       targetUserId: applicant.id,
       metadata: { applicationId: application.id, companyId: company.id, jobId: job.id },
     });
+    writeDb(db);
 
     res.status(201).json({
       message: "Application submitted successfully.",
-      application: await serializeApplication(application, applicant),
+      application: serializeApplication(db, application, applicant),
     });
   });
 
-  app.get("/api/applications/my", requireAuth, async (req, res) => {
-    const actor = await User.findOne({ id: req.auth.userId });
+  app.get("/api/applications/my", requireAuth, (req, res) => {
+    const db = readDb();
+    const actor = db.users.find((item) => item.id === req.auth.userId);
     if (!actor) {
       res.status(404).json({ message: "User not found." });
       return;
     }
 
-    const applications = await Application.find({ applicantUserId: actor.id }).sort({ updatedAt: -1, createdAt: -1 });
-    const serializedApps = await Promise.all(
-      applications.map((app) => serializeApplication(app, actor))
-    );
+    const applications = db.applications
+      .filter((application) => application.applicantUserId === actor.id)
+      .sort((left, right) => {
+        const rightDate = new Date(right.updatedAt || right.createdAt || 0).getTime();
+        const leftDate = new Date(left.updatedAt || left.createdAt || 0).getTime();
+        return rightDate - leftDate;
+      })
+      .map((application) => serializeApplication(db, application, actor));
 
-    res.json({ applications: serializedApps });
+    res.json({ applications });
   });
 
-  app.get("/api/companies/:companyId/applications", requireAuth, requireRole(["recruiter", "admin"]), async (req, res) => {
-    const actor = await User.findOne({ id: req.auth.userId });
-    const company = await getCompanyById(sanitizeText(req.params.companyId, 80));
+  app.get("/api/companies/:companyId/applications", requireAuth, requireRole(["recruiter", "admin"]), (req, res) => {
+    const db = readDb();
+    const actor = db.users.find((item) => item.id === req.auth.userId);
+    const company = getCompanyById(db, sanitizeText(req.params.companyId, 80));
     if (!company) {
       res.status(404).json({ message: "Company not found." });
       return;
     }
-    if (!canManageCompany(actor, company)) {
+    if (!canManageCompany(db, actor, company)) {
       res.status(403).json({ message: "You cannot manage this company." });
       return;
     }
-    const applications = await Application.find({ companyId: company.id }).sort({ updatedAt: -1, createdAt: -1 });
-    const serializedApps = await Promise.all(
-      applications.map((app) => serializeApplication(app, actor))
-    );
+    const applications = db.applications
+      .filter((application) => application.companyId === company.id)
+      .sort((left, right) => {
+        const rightDate = new Date(right.updatedAt || right.createdAt || 0).getTime();
+        const leftDate = new Date(left.updatedAt || left.createdAt || 0).getTime();
+        return rightDate - leftDate;
+      })
+      .map((application) => serializeApplication(db, application, actor));
 
-    res.json({ company: await serializeCompany(company, actor), applications: serializedApps });
+    res.json({ company: serializeCompany(db, company, actor), applications });
   });
 
-  app.get("/api/jobs/:jobId/applications", requireAuth, requireRole(["recruiter", "admin"]), async (req, res) => {
-    const actor = await User.findOne({ id: req.auth.userId });
-    const job = await getJobById(sanitizeText(req.params.jobId, 80));
-    const company = job ? await getCompanyById(job.companyId) : null;
+  app.get("/api/jobs/:jobId/applications", requireAuth, requireRole(["recruiter", "admin"]), (req, res) => {
+    const db = readDb();
+    const actor = db.users.find((item) => item.id === req.auth.userId);
+    const job = getJobById(db, sanitizeText(req.params.jobId, 80));
+    const company = job ? getCompanyById(db, job.companyId) : null;
     if (!job || !company) {
       res.status(404).json({ message: "Job not found." });
       return;
     }
-    if (!canManageCompany(actor, company)) {
+    if (!canManageCompany(db, actor, company)) {
       res.status(403).json({ message: "You cannot manage this job." });
       return;
     }
-    const applications = await Application.find({ jobId: job.id });
-    const serializedApps = await Promise.all(
-      applications.map((app) => serializeApplication(app, actor))
-    );
+    const applications = db.applications
+      .filter((application) => application.jobId === job.id)
+      .map((application) => serializeApplication(db, application, actor));
 
-    res.json({ job: await serializeJob(job, actor), applications: serializedApps });
+    res.json({ job: serializeJob(db, job, actor), applications });
   });
 
-  app.patch("/api/applications/:applicationId/review", requireAuth, requireRole(["recruiter", "admin"]), async (req, res) => {
-    const actor = await User.findOne({ id: req.auth.userId });
-    const application = await getApplicationById(sanitizeText(req.params.applicationId, 80));
-    const job = application ? await getJobById(application.jobId) : null;
-    const company = job ? await getCompanyById(job.companyId) : null;
+  app.patch("/api/applications/:applicationId/review", requireAuth, requireRole(["recruiter", "admin"]), (req, res) => {
+    const db = readDb();
+    const actor = db.users.find((item) => item.id === req.auth.userId);
+    const application = getApplicationById(db, sanitizeText(req.params.applicationId, 80));
+    const job = application ? getJobById(db, application.jobId) : null;
+    const company = job ? getCompanyById(db, job.companyId) : null;
     const status = typeof req.body.status === "string" ? sanitizeText(req.body.status, 40) : null;
     const note = sanitizeMultilineText(req.body.note, 800);
 
@@ -541,7 +560,7 @@ function registerOpportunityRoutes(app) {
       res.status(404).json({ message: "Application not found." });
       return;
     }
-    if (!canManageCompany(actor, company)) {
+    if (!canManageCompany(db, actor, company)) {
       res.status(403).json({ message: "You cannot review this application." });
       return;
     }
@@ -579,10 +598,7 @@ function registerOpportunityRoutes(app) {
     }
 
     application.updatedAt = new Date().toISOString();
-    application.markModified("statusHistory");
-    application.markModified("recruiterNotes");
-    
-    await appendAuditLog({
+    appendAuditLog(db, {
       actorUserId: actor.id,
       action: "APPLICATION_REVIEW_UPDATED",
       targetUserId: application.applicantUserId,
@@ -595,11 +611,11 @@ function registerOpportunityRoutes(app) {
         noteAdded: Boolean(note),
       },
     });
-    await application.save();
+    writeDb(db);
 
     res.json({
       message: "Application review updated.",
-      application: await serializeApplication(application, actor),
+      application: serializeApplication(db, application, actor),
     });
   });
 }
