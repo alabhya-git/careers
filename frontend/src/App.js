@@ -1525,6 +1525,27 @@ function App() {
                 </div>
               </div>
 
+              <div
+                className={`alert integrity-alert ${
+                  adminOverview?.audit?.integrity?.valid === false ? "error" : "success"
+                }`}
+              >
+                <strong>
+                  Audit Integrity:{" "}
+                  {adminOverview?.audit?.integrity?.valid === false ? "FAILED" : "VALID"}
+                </strong>
+                <p>
+                  Chain: {adminOverview?.audit?.integrity?.chainVersion || "-"} | Blockchain:{" "}
+                  {adminOverview?.audit?.integrity?.blockchainVersion || "-"} | Broken At:{" "}
+                  {adminOverview?.audit?.integrity?.brokenAt ?? "-"}
+                </p>
+                <p>
+                  Reason:{" "}
+                  {adminOverview?.audit?.integrity?.reason || "No integrity issue detected."}
+                </p>
+                <p>Total Entries: {adminOverview?.audit?.totalEntries ?? 0}</p>
+              </div>
+
               <div className="table-wrap">
                 <table>
                   <thead>

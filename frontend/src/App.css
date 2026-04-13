@@ -127,6 +127,10 @@ body {
   border-color: rgba(96, 165, 250, 0.42);
 }
 
+.integrity-alert {
+  margin-bottom: 0.85rem;
+}
+
 .auth-stage {
   display: grid;
   grid-template-columns: 1.05fr 1fr;

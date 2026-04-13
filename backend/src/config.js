@@ -18,4 +18,8 @@ module.exports = {
   OTP_WINDOW: Number(process.env.OTP_WINDOW || 1),
   TOTP_ISSUER: process.env.TOTP_ISSUER || "Damera Corp. Careers Portal",
   JWT_EXPIRY: process.env.JWT_EXPIRY || "2h",
+  AUDIT_BLOCKCHAIN_DIFFICULTY: Math.max(
+    0,
+    Number(process.env.AUDIT_BLOCKCHAIN_DIFFICULTY || 0)
+  ),
 };

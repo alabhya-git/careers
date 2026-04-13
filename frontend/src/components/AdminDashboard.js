@@ -25,6 +25,8 @@ function AdminDashboard({ request, currentUser, onStatus, onError, clearFeedback
   const [overview, setOverview] = useState(null);
   const [users, setUsers] = useState([]);
   const [logs, setLogs] = useState([]);
+  const [auditIntegrity, setAuditIntegrity] = useState(null);
+  const [lastAuditRefreshAt, setLastAuditRefreshAt] = useState(null);
   const [logSearch, setLogSearch] = useState("");
   const [isLoading, setIsLoading] = useState(false);
 
@@ -40,6 +42,8 @@ function AdminDashboard({ request, currentUser, onStatus, onError, clearFeedback
     setOverview(overviewResult);
     setUsers(usersResult.users || []);
     setLogs(logsResult.logs || []);
+    setAuditIntegrity(logsResult.integrity || overviewResult.audit?.integrity || null);
+    setLastAuditRefreshAt(new Date().toISOString());
   }, [logSearch, request]);
 
   useEffect(() => {
@@ -50,6 +54,11 @@ function AdminDashboard({ request, currentUser, onStatus, onError, clearFeedback
   }, [loadDashboard, onError]);
 
   const totals = useMemo(() => overview?.totals || {}, [overview]);
+  const overviewAudit = useMemo(() => overview?.audit || {}, [overview]);
+  const integrity = useMemo(
+    () => auditIntegrity || overviewAudit.integrity || null,
+    [auditIntegrity, overviewAudit]
+  );
 
   const toggleUserSuspension = async (user) => {
     clearFeedback();
@@ -139,6 +148,37 @@ function AdminDashboard({ request, currentUser, onStatus, onError, clearFeedback
           <span>Messages</span>
           <strong>{totals.totalMessages || 0}</strong>
         </div>
+      </div>
+
+      <div
+        className={`alert ${
+          integrity?.valid === false
+            ? "error"
+            : integrity
+              ? "success"
+              : "info"
+        }`}
+      >
+        <strong>
+          Audit Integrity:{" "}
+          {integrity
+            ? integrity.valid === false
+              ? "FAILED"
+              : "VALID"
+            : "CHECKING"}
+        </strong>
+        <p>
+          Chain: {integrity?.chainVersion || "-"} | Blockchain:{" "}
+          {integrity?.blockchainVersion || "-"} | Broken At:{" "}
+          {integrity?.brokenAt ?? "-"}
+        </p>
+        <p>
+          Reason: {integrity?.reason || "No integrity issue detected."}
+        </p>
+        <p>
+          Last Checked: {formatDate(lastAuditRefreshAt)} | Total Entries:{" "}
+          {overviewAudit.totalEntries ?? logs.length}
+        </p>
       </div>
 
       <div className="table-wrap">
