@@ -1,4 +1,8 @@
-const { appendAuditLog, verifyAuditChain } = require("../audit");
+const {
+  appendAuditLog,
+  verifyAuditChain,
+  summarizeAuditBlockchain,
+} = require("../audit");
 const { readDb, writeDb } = require("../store");
 const {
   sanitizeText,
@@ -40,6 +44,7 @@ function registerAdminRoutes(app) {
       audit: {
         totalEntries: db.auditLogs.length,
         integrity: verifyAuditChain(db.auditLogs),
+        blockchain: summarizeAuditBlockchain(db.auditLogs),
         recent: db.auditLogs.slice(-15).reverse(),
       },
     });
@@ -137,6 +142,7 @@ function registerAdminRoutes(app) {
 
     res.json({
       integrity: verifyAuditChain(db.auditLogs),
+      blockchain: summarizeAuditBlockchain(db.auditLogs),
       logs: logs.slice(0, limit),
     });
   });

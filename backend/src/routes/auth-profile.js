@@ -4,6 +4,7 @@ const multer = require("multer");
 const { v4: uuidv4 } = require("uuid");
 const { RESUME_DIR } = require("../config");
 const { appendAuditLog } = require("../audit");
+const { analyzeResumeFile } = require("../resume-intelligence");
 const { readDb, writeDb } = require("../store");
 const {
   hashPassword,
@@ -434,7 +435,7 @@ function registerAuthProfileRoutes(app) {
     res.json({ message: "Profile updated.", profile: user.profile });
   });
 
-  app.post("/api/resume/upload", requireAuth, upload.single("resume"), (req, res) => {
+  app.post("/api/resume/upload", requireAuth, upload.single("resume"), async (req, res) => {
     const db = readDb();
     const user = db.users.find((item) => item.id === req.auth.userId);
     if (!user) {
@@ -447,16 +448,23 @@ function registerAuthProfileRoutes(app) {
       return;
     }
 
+    const previousResume = user.resume;
     const encrypted = encryptBuffer(req.file.buffer);
     const storageName = `${user.id}-${Date.now()}-${uuidv4()}.enc`;
     fs.writeFileSync(path.join(RESUME_DIR, storageName), encrypted.ciphertext);
 
-    if (user.resume?.storageName) {
-      const oldPath = path.join(RESUME_DIR, user.resume.storageName);
+    if (previousResume?.storageName) {
+      const oldPath = path.join(RESUME_DIR, previousResume.storageName);
       if (fs.existsSync(oldPath)) {
         fs.unlinkSync(oldPath);
       }
     }
+
+    const analysis = await analyzeResumeFile({
+      buffer: req.file.buffer,
+      mimeType: req.file.mimetype,
+      originalName: req.file.originalname,
+    });
 
     user.resume = {
       id: uuidv4(),
@@ -469,9 +477,10 @@ function registerAuthProfileRoutes(app) {
       algorithm: encrypted.algorithm,
       keyVersion: encrypted.keyVersion,
       uploadedAt: new Date().toISOString(),
-      accessUserIds: Array.isArray(user.resume?.accessUserIds)
-        ? user.resume.accessUserIds
+      accessUserIds: Array.isArray(previousResume?.accessUserIds)
+        ? previousResume.accessUserIds
         : [],
+      analysis,
     };
     user.updatedAt = new Date().toISOString();
     appendAuditLog(db, {
@@ -482,12 +491,19 @@ function registerAuthProfileRoutes(app) {
         fileName: req.file.originalname,
         mimeType: req.file.mimetype,
         sizeBytes: req.file.size,
+        parseStatus: analysis.parseStatus,
+        extractedSkillsCount: Array.isArray(analysis.extractedSkills)
+          ? analysis.extractedSkills.length
+          : 0,
       },
     });
     writeDb(db);
 
     res.status(201).json({
-      message: "Resume uploaded and encrypted successfully.",
+      message:
+        analysis.parseStatus === "parsed"
+          ? "Resume uploaded, encrypted, and analyzed successfully."
+          : "Resume uploaded and encrypted successfully.",
       resume: safeResumeMetadata(user.resume),
     });
   });

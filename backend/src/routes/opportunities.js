@@ -21,6 +21,7 @@ const {
   getManagedCompanyIds,
   canManageCompany,
   createUniqueCompanySlug,
+  resolveUserFromAuthorizationHeader,
   serializeCompany,
   serializeJob,
   serializeApplication,
@@ -226,6 +227,10 @@ function registerOpportunityRoutes(app) {
 
   app.get("/api/jobs", (req, res) => {
     const db = readDb();
+    const viewer = resolveUserFromAuthorizationHeader(
+      db,
+      req.headers.authorization || ""
+    );
     const query = sanitizeText(req.query.q || "", 120).toLowerCase();
     const companyFilter = sanitizeText(req.query.company || "", 120).toLowerCase();
     const locationFilter = sanitizeText(req.query.location || "", 120).toLowerCase();
@@ -257,12 +262,19 @@ function registerOpportunityRoutes(app) {
         if (employmentType && job.employmentType !== employmentType) return false;
         return true;
       })
+      .map((job) => serializeJob(db, job, viewer))
       .sort((left, right) => {
+        if (viewer?.role === "user") {
+          const leftMatch = left.match?.score || 0;
+          const rightMatch = right.match?.score || 0;
+          if (rightMatch !== leftMatch) {
+            return rightMatch - leftMatch;
+          }
+        }
         const rightDate = new Date(right.updatedAt || right.createdAt || 0).getTime();
         const leftDate = new Date(left.updatedAt || left.createdAt || 0).getTime();
         return rightDate - leftDate;
-      })
-      .map((job) => serializeJob(db, job));
+      });
 
     res.json({ jobs });
   });

@@ -522,13 +522,13 @@ function HiringHub({ request, onStatus, onError, clearFeedback }) {
                       <div>
                         <h4>{job.title}</h4>
                         <p>
-                          {job.location} • {job.employmentType}
+                          {job.location} | {job.employmentType}
                         </p>
                       </div>
                       <span className={`status-pill status-${job.status}`}>{job.status}</span>
                     </div>
                     <p className="muted-copy">
-                      {job.applicantCount || 0} applicants • Deadline {formatHumanDate(job.applicationDeadline)}
+                      {job.applicantCount || 0} applicants | Deadline {formatHumanDate(job.applicationDeadline)}
                     </p>
                     <div className="inline-actions">
                       <button
@@ -555,7 +555,7 @@ function HiringHub({ request, onStatus, onError, clearFeedback }) {
                           {application.applicant?.profile?.name || application.applicant?.email}
                         </h4>
                         <p>
-                          {application.job?.title} • {application.company?.name}
+                          {application.job?.title} | {application.company?.name}
                         </p>
                       </div>
                       <span className={`status-pill status-${String(application.status).toLowerCase()}`}>
@@ -567,9 +567,39 @@ function HiringHub({ request, onStatus, onError, clearFeedback }) {
                     <p className="muted-copy">
                       Applied {formatHumanDate(application.createdAt)}
                       {application.applicantResume?.originalName
-                        ? ` • Resume ${application.applicantResume.originalName}`
+                        ? ` | Resume ${application.applicantResume.originalName}`
                         : ""}
                     </p>
+
+                    {application.jobMatch ? (
+                      <div className="summary-card compact-card">
+                        <div className="job-card-header">
+                          <div>
+                            <h4>Intelligent Match</h4>
+                            <p>
+                              {application.jobMatch.band} alignment for {application.job?.title}
+                            </p>
+                          </div>
+                          <span className="badge">{application.jobMatch.score}%</span>
+                        </div>
+                        {(application.jobMatch.matchedSkills || []).length ? (
+                          <p className="muted-copy">
+                            Matched skills: {application.jobMatch.matchedSkills.join(", ")}
+                          </p>
+                        ) : null}
+                        {(application.jobMatch.missingSkills || []).length ? (
+                          <p className="muted-copy">
+                            Missing signals:{" "}
+                            {application.jobMatch.missingSkills.slice(0, 5).join(", ")}
+                          </p>
+                        ) : null}
+                        {(application.jobMatch.keywordHits || []).length ? (
+                          <p className="muted-copy">
+                            Keyword overlap: {application.jobMatch.keywordHits.join(", ")}
+                          </p>
+                        ) : null}
+                      </div>
+                    ) : null}
 
                     <div className="grid-two">
                       <label>

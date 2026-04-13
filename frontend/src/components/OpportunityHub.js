@@ -44,7 +44,9 @@ function OpportunityHub({ request, currentUser, onStatus, onError, clearFeedback
 
       try {
         const [jobsResponse, companiesResponse, applicationsResponse] = await Promise.all([
-          request(`/api/jobs${buildQuery(activeFilters)}`),
+          request(`/api/jobs${buildQuery(activeFilters)}`, {
+            auth: currentUser.role === "user",
+          }),
           request("/api/companies"),
           currentUser.role === "user"
             ? request("/api/applications/my", { auth: true })
@@ -204,7 +206,10 @@ function OpportunityHub({ request, currentUser, onStatus, onError, clearFeedback
         <div className="stack-panel">
           <div className="stack-panel-heading">
             <h3>Open Positions</h3>
-            <span className="badge">{jobs.length} results</span>
+            <span className="badge">
+              {jobs.length} results
+              {currentUser.role === "user" ? " | sorted by match" : ""}
+            </span>
           </div>
 
           <div className="card-stack">
@@ -224,7 +229,8 @@ function OpportunityHub({ request, currentUser, onStatus, onError, clearFeedback
                   </div>
 
                   <p className="muted-copy">
-                    {job.location} • {job.employmentType} • Deadline {formatDate(job.applicationDeadline)}
+                    {job.location} | {job.employmentType} | Deadline{" "}
+                    {formatDate(job.applicationDeadline)}
                   </p>
                   <p>{job.description}</p>
 
@@ -235,6 +241,34 @@ function OpportunityHub({ request, currentUser, onStatus, onError, clearFeedback
                       </span>
                     ))}
                   </div>
+
+                  {job.match ? (
+                    <div className="summary-card compact-card">
+                      <div className="job-card-header">
+                        <div>
+                          <h4>Resume Match</h4>
+                          <p>{job.match.band} fit for your uploaded resume</p>
+                        </div>
+                        <span className="badge">{job.match.score}%</span>
+                      </div>
+
+                      {(job.match.matchedSkills || []).length ? (
+                        <p className="muted-copy">
+                          Matched skills: {job.match.matchedSkills.join(", ")}
+                        </p>
+                      ) : null}
+                      {(job.match.missingSkills || []).length ? (
+                        <p className="muted-copy">
+                          Missing signals: {job.match.missingSkills.slice(0, 5).join(", ")}
+                        </p>
+                      ) : null}
+                      {(job.match.keywordHits || []).length ? (
+                        <p className="muted-copy">
+                          Keyword overlap: {job.match.keywordHits.join(", ")}
+                        </p>
+                      ) : null}
+                    </div>
+                  ) : null}
 
                   {currentUser.role === "user" ? (
                     <div className="inline-actions">
@@ -297,7 +331,7 @@ function OpportunityHub({ request, currentUser, onStatus, onError, clearFeedback
               <article key={company.id} className="summary-card">
                 <h4>{company.name}</h4>
                 <p className="muted-copy">
-                  {company.location} • {company.counts?.openJobs || 0} open jobs
+                  {company.location} | {company.counts?.openJobs || 0} open jobs
                 </p>
                 <p>{company.description}</p>
                 <a
@@ -335,9 +369,14 @@ function OpportunityHub({ request, currentUser, onStatus, onError, clearFeedback
                 </div>
                 <p className="muted-copy">
                   Applied {formatDate(application.createdAt)}
-                  {application.isShortlisted ? " • Shortlisted" : ""}
+                  {application.isShortlisted ? " | Shortlisted" : ""}
                 </p>
                 <p>{application.coverNote || "No cover note shared."}</p>
+                {application.jobMatch ? (
+                  <p className="muted-copy">
+                    Resume match for this role: {application.jobMatch.score}% ({application.jobMatch.band})
+                  </p>
+                ) : null}
 
                 <div className="timeline-list">
                   {(application.statusHistory || []).map((entry) => (

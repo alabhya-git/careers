@@ -20,6 +20,6 @@ module.exports = {
   JWT_EXPIRY: process.env.JWT_EXPIRY || "2h",
   AUDIT_BLOCKCHAIN_DIFFICULTY: Math.max(
     0,
-    Number(process.env.AUDIT_BLOCKCHAIN_DIFFICULTY || 0)
+    Number(process.env.AUDIT_BLOCKCHAIN_DIFFICULTY || 2)
   ),
 };

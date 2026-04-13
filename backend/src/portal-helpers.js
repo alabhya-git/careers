@@ -4,6 +4,7 @@ const { v4: uuidv4 } = require("uuid");
 const { RESUME_DIR, OTP_STEP_SECONDS, TOTP_ISSUER } = require("./config");
 const { appendAuditLog } = require("./audit");
 const { readDb, writeDb } = require("./store");
+const { buildJobMatchInsight } = require("./resume-intelligence");
 const { hashPassword, verifyTotp, verifyAuthToken } = require("./security");
 
 const PROFILE_PRIVACY_OPTIONS = new Set(["public", "connections", "private"]);
@@ -274,6 +275,47 @@ function safeResumeMetadata(resume) {
     return null;
   }
 
+  const analysis =
+    resume.analysis && typeof resume.analysis === "object"
+      ? {
+          parseStatus: resume.analysis.parseStatus || "empty",
+          parsedAt: resume.analysis.parsedAt || null,
+          parser: resume.analysis.parser || "unknown",
+          pageCount:
+            Number.isFinite(Number(resume.analysis.pageCount)) &&
+            Number(resume.analysis.pageCount) > 0
+              ? Number(resume.analysis.pageCount)
+              : null,
+          wordCount:
+            Number.isFinite(Number(resume.analysis.wordCount)) &&
+            Number(resume.analysis.wordCount) >= 0
+              ? Number(resume.analysis.wordCount)
+              : 0,
+          extractedSkills: Array.isArray(resume.analysis.extractedSkills)
+            ? resume.analysis.extractedSkills
+            : [],
+          topKeywords: Array.isArray(resume.analysis.topKeywords)
+            ? resume.analysis.topKeywords
+            : [],
+          yearsOfExperience: resume.analysis.yearsOfExperience === null
+            ? null
+            : Number.isFinite(Number(resume.analysis.yearsOfExperience)) &&
+                Number(resume.analysis.yearsOfExperience) >= 0
+              ? Number(resume.analysis.yearsOfExperience)
+              : null,
+          sectionsDetected: Array.isArray(resume.analysis.sectionsDetected)
+            ? resume.analysis.sectionsDetected
+            : [],
+          summary: typeof resume.analysis.summary === "string"
+            ? resume.analysis.summary
+            : "",
+          parseWarning:
+            typeof resume.analysis.parseWarning === "string"
+              ? resume.analysis.parseWarning
+              : "",
+        }
+      : null;
+
   return {
     id: resume.id,
     originalName: resume.originalName,
@@ -285,6 +327,7 @@ function safeResumeMetadata(resume) {
     accessUserIds: Array.isArray(resume.accessUserIds)
       ? resume.accessUserIds
       : [],
+    analysis,
   };
 }
 
@@ -464,6 +507,25 @@ function requireRole(roles) {
   };
 }
 
+function resolveUserFromAuthorizationHeader(db, authorizationHeader) {
+  if (!authorizationHeader.startsWith("Bearer ")) {
+    return null;
+  }
+
+  try {
+    const payload = verifyAuthToken(
+      authorizationHeader.slice("Bearer ".length)
+    );
+    const user = db.users.find((item) => item.id === payload.sub) || null;
+    if (!user || user.isSuspended) {
+      return null;
+    }
+    return user;
+  } catch (error) {
+    return null;
+  }
+}
+
 function serializeCompany(db, company, viewer = null) {
   const jobs = db.jobs.filter((job) => job.companyId === company.id);
   const openJobs = jobs.filter(
@@ -497,6 +559,8 @@ function serializeJob(db, job, viewer = null) {
     (application) => application.jobId === job.id
   ).length;
   const canManage = canManageCompany(db, viewer, company);
+  const match =
+    viewer?.role === "user" ? buildJobMatchInsight(job, viewer, company) : null;
 
   return {
     id: job.id,
@@ -526,6 +590,7 @@ function serializeJob(db, job, viewer = null) {
       : null,
     applicantCount: canManage ? applicantCount : undefined,
     canManage,
+    match,
   };
 }
 
@@ -535,6 +600,8 @@ function serializeApplication(db, application, viewer = null) {
   const company = job ? getCompanyById(db, job.companyId) : null;
   const viewerIsApplicant = viewer && viewer.id === application.applicantUserId;
   const viewerCanManage = canManageCompany(db, viewer, company);
+  const jobMatch =
+    applicant && job ? buildJobMatchInsight(job, applicant, company) : null;
 
   return {
     id: application.id,
@@ -562,6 +629,10 @@ function serializeApplication(db, application, viewer = null) {
     applicantResume:
       viewerCanManage || viewer?.role === "admin" || viewerIsApplicant
         ? safeResumeMetadata(applicant?.resume)
+        : null,
+    jobMatch:
+      viewerCanManage || viewer?.role === "admin" || viewerIsApplicant
+        ? jobMatch
         : null,
     company: company
       ? {
@@ -757,6 +828,25 @@ function migrateUsersAndCollectionsIfNeeded() {
     }
     if (userChanged) {
       user.updatedAt = user.updatedAt || now;
+    }
+
+    if (user.resume && typeof user.resume === "object") {
+      if (!user.resume.analysis || typeof user.resume.analysis !== "object") {
+        user.resume.analysis = {
+          parseStatus: "empty",
+          parsedAt: null,
+          parser: "unknown",
+          pageCount: null,
+          wordCount: 0,
+          extractedSkills: [],
+          topKeywords: [],
+          yearsOfExperience: null,
+          sectionsDetected: [],
+          summary: "",
+          parseWarning: "",
+        };
+        changed = true;
+      }
     }
   });
 
@@ -980,6 +1070,7 @@ module.exports = {
   findConversationById,
   getMessagingDirectory,
   isRecruiterAuthorizedByApplication,
+  resolveUserFromAuthorizationHeader,
   migrateUsersAndCollectionsIfNeeded,
   deleteUserRecord,
   ensureDefaultAdminAccount,

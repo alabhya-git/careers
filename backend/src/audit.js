@@ -207,7 +207,44 @@ function verifyAuditChain(logs) {
   };
 }
 
+function summarizeAuditBlockchain(logs) {
+  const blockchainEntries = logs.filter(
+    (entry) => entry.blockchainVersion === BLOCKCHAIN_VERSION
+  );
+  const signedEntries = logs.filter(
+    (entry) =>
+      entry.chainVersion === CHAIN_VERSION_HMAC ||
+      entry.chainVersion === CHAIN_VERSION_PKI
+  );
+  const difficulties = blockchainEntries
+    .map((entry) => Number(entry.blockDifficulty || 0))
+    .filter((entry) => Number.isFinite(entry) && entry >= 0);
+  const nonces = blockchainEntries
+    .map((entry) => Number(entry.blockNonce || 0))
+    .filter((entry) => Number.isFinite(entry) && entry >= 0);
+  const latestBlock = blockchainEntries.length
+    ? blockchainEntries[blockchainEntries.length - 1]
+    : null;
+  const genesisBlock = blockchainEntries.length ? blockchainEntries[0] : null;
+  const averageNonce = nonces.length
+    ? Math.round(nonces.reduce((sum, value) => sum + value, 0) / nonces.length)
+    : 0;
+
+  return {
+    totalBlocks: blockchainEntries.length,
+    signedEntries: signedEntries.length,
+    proofOfWorkEnabled: difficulties.some((difficulty) => difficulty > 0),
+    currentDifficulty: latestBlock ? Number(latestBlock.blockDifficulty || 0) : 0,
+    maxDifficulty: difficulties.length ? Math.max(...difficulties) : 0,
+    latestBlockHash: latestBlock?.blockHash || null,
+    genesisBlockHash: genesisBlock?.blockHash || null,
+    averageNonce,
+    highestNonce: nonces.length ? Math.max(...nonces) : 0,
+  };
+}
+
 module.exports = {
   appendAuditLog,
   verifyAuditChain,
+  summarizeAuditBlockchain,
 };

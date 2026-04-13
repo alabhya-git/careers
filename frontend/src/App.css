@@ -355,6 +355,10 @@ textarea:focus {
   background: rgba(9, 18, 31, 0.62);
 }
 
+.compact-card {
+  margin: 0;
+}
+
 .summary-card p {
   margin: 0.3rem 0;
 }

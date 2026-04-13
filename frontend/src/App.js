@@ -5,7 +5,23 @@ import OpportunityHub from "./components/OpportunityHub";
 import HiringHub from "./components/HiringHub";
 import MessagingHub from "./components/MessagingHub";
 import VirtualKeyboard from "./components/VirtualKeyboard";
-const API_BASE = process.env.REACT_APP_API_BASE_URL || "http://localhost:5000";
+
+function resolveApiBase() {
+  if (process.env.REACT_APP_API_BASE_URL) {
+    return process.env.REACT_APP_API_BASE_URL;
+  }
+
+  if (typeof window !== "undefined") {
+    if (window.location.hostname === "localhost") {
+      return "http://localhost:5000";
+    }
+    return window.location.origin;
+  }
+
+  return "http://localhost:5000";
+}
+
+const API_BASE = resolveApiBase();
 const LOCAL_TOKEN_KEY = "job_portal_token";
 
 const PROFILE_PRIVACY_KEYS = [
@@ -1028,6 +1044,7 @@ function App() {
                   <label>
                     Authenticator code
                     <VirtualKeyboard
+                      value={forgotForm.totp}
                       onChange={(val) =>
                         setForgotForm((previous) => ({
                           ...previous,
@@ -1327,13 +1344,35 @@ function App() {
                   <p>{resumeInfo.originalName}</p>
                   <p>{resumeInfo.algorithm} at rest</p>
                   <p>{formatDate(resumeInfo.uploadedAt)}</p>
+                  {resumeInfo.analysis?.parseStatus === "parsed" ? (
+                    <>
+                      <p>
+                        Parsed with {resumeInfo.analysis.parser} | {resumeInfo.analysis.wordCount} words
+                      </p>
+                      <div className="chip-row">
+                        {(resumeInfo.analysis.extractedSkills || []).map((skill) => (
+                          <span key={skill} className="chip">
+                            {skill}
+                          </span>
+                        ))}
+                      </div>
+                      {(resumeInfo.analysis.topKeywords || []).length ? (
+                        <p className="muted-copy">
+                          Top keywords: {resumeInfo.analysis.topKeywords.join(", ")}
+                        </p>
+                      ) : null}
+                    </>
+                  ) : null}
+                  {resumeInfo.analysis?.parseWarning ? (
+                    <p className="muted-copy">{resumeInfo.analysis.parseWarning}</p>
+                  ) : null}
                 </div>
               )}
 
               <div className="download-tools">
                 <label>
                   Authenticator code
-                  <VirtualKeyboard onChange={(val) => setDownloadTotp(val)} />
+                  <VirtualKeyboard value={downloadTotp} onChange={(val) => setDownloadTotp(val)} />
                   <input
                     type="hidden"
                     value={downloadTotp}
@@ -1365,6 +1404,7 @@ function App() {
                     <label>
                       Authenticator code
                       <VirtualKeyboard
+                        value={securityReset.totp}
                         onChange={(value) =>
                           setSecurityReset((previous) => ({
                             ...previous,
@@ -1425,6 +1465,7 @@ function App() {
                     <label>
                       Authenticator code
                       <VirtualKeyboard
+                        value={securityDelete.totp}
                         onChange={(value) =>
                           setSecurityDelete((previous) => ({
                             ...previous,
@@ -1543,6 +1584,16 @@ function App() {
                   {adminOverview?.audit?.integrity?.reason || "No integrity issue detected."}
                 </p>
                 <p>Total Entries: {adminOverview?.audit?.totalEntries ?? 0}</p>
+                <p>
+                  Blocks: {adminOverview?.audit?.blockchain?.totalBlocks ?? 0} | Difficulty:{" "}
+                  {adminOverview?.audit?.blockchain?.currentDifficulty ?? 0} | Latest Block:{" "}
+                  {adminOverview?.audit?.blockchain?.latestBlockHash || "-"}
+                </p>
+                <p>
+                  Proof of Work:{" "}
+                  {adminOverview?.audit?.blockchain?.proofOfWorkEnabled ? "Enabled" : "Disabled"}{" "}
+                  | Avg Nonce: {adminOverview?.audit?.blockchain?.averageNonce ?? 0}
+                </p>
               </div>
 
               <div className="table-wrap">

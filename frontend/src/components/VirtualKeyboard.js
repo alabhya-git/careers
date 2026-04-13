@@ -1,39 +1,34 @@
-import React, { useState } from "react";
+import React from "react";
 
-const VirtualKeyboard = ({ onChange }) => {
-  const [otp, setOtp] = useState("");
+const DIGITS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 0];
 
-  // fixed keypad (no shuffle)
-  const numbers = [1,2,3,4,5,6,7,8,9,0];
+function VirtualKeyboard({ value = "", onChange, maxLength = 6 }) {
+  const otp = String(value || "").slice(0, maxLength);
 
-  const handleClick = (num) => {
-    if (otp.length < 6) {
-      const newOtp = otp + num;
-      setOtp(newOtp);
-      onChange(newOtp);
+  const handleDigitClick = (digit) => {
+    if (otp.length >= maxLength) {
+      return;
     }
+
+    onChange(`${otp}${digit}`);
   };
 
   const handleBackspace = () => {
-    const newOtp = otp.slice(0, -1);
-    setOtp(newOtp);
-    onChange(newOtp);
+    onChange(otp.slice(0, -1));
   };
 
   const handleClear = () => {
-    setOtp("");
     onChange("");
   };
 
   return (
     <div style={{ textAlign: "center", marginTop: "20px" }}>
-      
-      {/* OTP Display */}
       <input
         type="password"
         value={otp}
         readOnly
         placeholder="Enter OTP"
+        aria-label="OTP display"
         style={{
           fontSize: "22px",
           textAlign: "center",
@@ -44,11 +39,10 @@ const VirtualKeyboard = ({ onChange }) => {
           marginBottom: "20px",
           letterSpacing: "6px",
           backgroundColor: "#111",
-          color: "#fff"
+          color: "#fff",
         }}
       />
 
-      {/* Keypad */}
       <div
         style={{
           display: "grid",
@@ -57,23 +51,30 @@ const VirtualKeyboard = ({ onChange }) => {
           justifyContent: "center",
         }}
       >
-        {numbers.slice(0, 9).map((num) => (
+        {DIGITS.slice(0, 9).map((digit) => (
           <button
-            key={num}
-            onClick={() => handleClick(num)}
+            key={digit}
+            type="button"
+            onClick={() => handleDigitClick(digit)}
             style={buttonStyle}
           >
-            {num}
+            {digit}
           </button>
         ))}
 
-        <button onClick={handleClear} style={buttonStyle}>C</button>
-        <button onClick={() => handleClick(0)} style={buttonStyle}>0</button>
-        <button onClick={handleBackspace} style={buttonStyle}>←</button>
+        <button type="button" onClick={handleClear} style={buttonStyle}>
+          C
+        </button>
+        <button type="button" onClick={() => handleDigitClick(0)} style={buttonStyle}>
+          0
+        </button>
+        <button type="button" onClick={handleBackspace} style={buttonStyle}>
+          Back
+        </button>
       </div>
     </div>
   );
-};
+}
 
 const buttonStyle = {
   padding: "15px",
