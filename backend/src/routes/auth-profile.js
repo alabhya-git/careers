@@ -3,6 +3,7 @@ const path = require("path");
 const multer = require("multer");
 const { v4: uuidv4 } = require("uuid");
 const { RESUME_DIR } = require("../config");
+const { extractTextFromBuffer } = require("../resume-parser");
 const { appendAuditLog } = require("../audit");
 const { readDb, writeDb } = require("../store");
 const {
@@ -447,6 +448,8 @@ function registerAuthProfileRoutes(app) {
       return;
     }
 
+    const parsedText = await extractTextFromBuffer(req.file.buffer, req.file.mimetype);
+
     const encrypted = encryptBuffer(req.file.buffer);
     const storageName = `${user.id}-${Date.now()}-${uuidv4()}.enc`;
     fs.writeFileSync(path.join(RESUME_DIR, storageName), encrypted.ciphertext);
@@ -469,6 +472,7 @@ function registerAuthProfileRoutes(app) {
       algorithm: encrypted.algorithm,
       keyVersion: encrypted.keyVersion,
       uploadedAt: new Date().toISOString(),
+      parsedText: parsedText || "",
       accessUserIds: Array.isArray(user.resume?.accessUserIds)
         ? user.resume.accessUserIds
         : [],
